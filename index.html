@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>ASSET DESIGNER</title>
+  <script src="/oops.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0a1812;
+      font-family: 'Courier New', Courier, monospace; color: #9fd9b6; -webkit-user-select: none; user-select: none; }
+    #canvas-container { position: fixed; inset: 0; }
+    #canvas-container canvas { display: block; width: 100% !important; height: 100% !important; touch-action: none; }
+
+    /* shared widget look */
+    .widget { position: fixed; z-index: 100; }
+    .wbtn { background: rgba(5,16,11,0.92); border: 1px solid #1d4030; color: #5dff9f;
+      font-family: inherit; font-size: 11px; font-weight: bold; letter-spacing: 0.14em;
+      padding: 8px 11px; cursor: pointer; outline: none; white-space: nowrap; }
+    .wbtn:hover { border-color: #5dff9f; }
+    .wpanel { display: none; margin-top: 5px; background: rgba(5,16,11,0.95); border: 1px solid #133022; padding: 9px; }
+    .widget.open .wpanel { display: block; }
+    .widget.open .wbtn { border-color: #5dff9f; color: #5dff9f; background: rgba(93,255,159,0.08); }
+
+    /* anchors */
+    #w-assets { top: 8px; left: 8px; }
+    #w-export { top: 8px; left: 50%; transform: translateX(-50%); text-align: center; }
+    #w-colors { top: 8px; right: 8px; text-align: right; }
+    #w-stats  { bottom: 8px; left: 8px; }
+    #w-tools  { bottom: 8px; right: 8px; }
+
+    /* assets: vertical scrollable list */
+    #assets-list { max-height: calc(100vh - 64px); overflow-y: auto; min-width: 150px; }
+    #assets-list button { display: block; width: 100%; text-align: left; background: transparent;
+      border: 1px solid #163225; color: #7fc79c; font-family: inherit; font-size: 11px;
+      letter-spacing: 0.08em; padding: 7px 9px; margin-bottom: 3px; cursor: pointer; outline: none; }
+    #assets-list button.active { border-color: #5dff9f; color: #5dff9f; background: rgba(93,255,159,0.07); }
+    #assets-list button.user { font-style: italic; }
+    #assets-list .del-asset { float: right; color: #5a3a3a; padding: 0 2px; font-style: normal; }
+    #assets-list .del-asset:hover { color: #ff8a8a; }
+    #new-asset-btn { text-align: center !important; color: #5dff9f !important; border-color: #2b6f4a !important;
+      border-style: dashed !important; letter-spacing: 0.12em; margin-top: 5px; }
+    #new-asset-btn:hover { border-color: #5dff9f !important; background: rgba(93,255,159,0.08) !important; }
+
+    /* Edge-anchored icon toolbars, a quarter of the way down. RIGHT = element-select
+       mode (OBJECT/VERTEX/EDGE/FACE). LEFT = how a pick combines (NORMAL/ADD/SUBTRACT)
+       + a SELECT-ALL action. Same small square buttons on both sides. */
+    #w-selmode { top: 25%; right: 8px; display: flex; flex-direction: column; gap: 4px; z-index: 101; }
+    #w-selop   { top: 25%; left: 8px;  display: flex; flex-direction: column; gap: 4px; z-index: 101; }
+    .selmode-btn, .selop-btn, .selact-btn { width: 34px; height: 34px; padding: 5px;
+      background: rgba(5,16,11,0.92); border: 1px solid #1d4030; cursor: pointer; outline: none; display: block; }
+    .selmode-btn:hover, .selop-btn:hover, .selact-btn:hover { border-color: #5dff9f; }
+    .selmode-btn.active, .selop-btn.active { border-color: #5dff9f; background: rgba(93,255,159,0.14); }
+    .selact-btn { margin-top: 6px; border-style: dashed; }   /* an action, not a toggle */
+    .selmode-btn svg, .selop-btn svg, .selact-btn svg { display: block; width: 100%; height: 100%; }
+    .ic { stroke: #7fc79c; fill: none; stroke-width: 1.6; }
+    .icf { fill: #7fc79c; stroke: none; }
+    .selmode-btn.active .ic, .selop-btn.active .ic { stroke: #5dff9f; }
+    .selmode-btn.active .icf, .selop-btn.active .icf { fill: #5dff9f; }
+
+    /* colors: 8 swatches down the right */
+    #colors-list { display: grid; grid-template-columns: repeat(2, 1fr); gap: 5px; }
+    .accent-sw { width: 30px; height: 26px; border: 2px solid transparent; cursor: pointer; outline: none; padding: 0; }
+    .accent-sw.active { border-color: #5dff9f; box-shadow: 0 0 6px rgba(93,255,159,0.55); }
+
+    /* stats */
+    #w-stats .wpanel { min-width: 230px; }
+    #stats-name { font-size: 12px; font-weight: bold; letter-spacing: 0.16em; color: #5dff9f; margin-bottom: 8px; }
+    .srow { display: flex; align-items: center; gap: 8px; font-size: 11px; margin-bottom: 5px; }
+    .srow label { color: #5a8a6f; width: 88px; flex-shrink: 0; letter-spacing: 0.08em; }
+    .srow .val { color: #cdeede; }
+    .srow input { width: 56px; background: #0a1812; border: 1px solid #1d4030; color: #cdeede;
+      font-family: inherit; font-size: 11px; padding: 3px 5px; outline: none; }
+    .srow input.small { width: 40px; }
+
+    /* export */
+    #export-panel { min-width: 260px; }
+    #export-panel .ehint { font-size: 9px; color: #5a8a6f; letter-spacing: 0.04em; }
+    #export-panel textarea { width: 100%; height: 120px; background: #0a1812; border: 1px solid #1d4030;
+      color: #9fd9b6; font-family: inherit; font-size: 10px; padding: 6px; outline: none; resize: vertical; margin: 6px 0; }
+    #export-panel .ebtns { display: flex; gap: 5px; }
+    #export-panel .ebtns button { flex: 1; background: transparent; border: 1px solid #1d4030; color: #7fc79c;
+      font-family: inherit; font-size: 10px; letter-spacing: 0.1em; padding: 6px; cursor: pointer; outline: none; }
+    #export-panel .ebtns button:hover { border-color: #5dff9f; color: #5dff9f; }
+    #export-panel .ebtns #btn-reset { border-color: #5a3030; color: #d98a8a; }
+    #export-panel .ebtns #btn-reset:hover { border-color: #ff8a8a; color: #ff8a8a; }
+    #export-msg { font-size: 10px; color: #6a9a7f; margin-top: 5px; min-height: 12px; }
+    /* autosave flash under the EXPORT button (always visible, panel can stay collapsed) */
+    #save-dot { font-size: 10px; letter-spacing: 0.1em; color: #5dff9f; margin-top: 3px; min-height: 12px;
+      text-align: center; opacity: 0; transition: opacity 0.25s; pointer-events: none; text-shadow: 0 1px 3px rgba(0,0,0,0.8); }
+    #save-dot.show { opacity: 0.95; }
+
+    /* tools: a vertical stack at bottom-right. Every menu it spawns FLOATS UP from the
+       bottom of the window (fixed + bottom-anchored), never starting mid-screen at the
+       parent. Only one menu per level is open at a time, so they share a fixed slot. */
+    #tools-stack { display: flex; flex-direction: column; align-items: flex-end; gap: 5px; }
+    #w-tools .wpanel { background: transparent; border: none; padding: 0; }
+    .tool { position: relative; }
+    .subtool { position: relative; }
+
+    /* ONE button look for the whole tool/material tree: DARK by default, lit ONLY when
+       selected. (Colour/texture sample swatches are excluded — they stay small squares.) */
+    .tool > .tool-btn,
+    .subtool > .subtool-btn,
+    .tool-kids button[data-geo],
+    .tool-kids button[data-axis],
+    .tool-kids button[data-dmgstyle],
+    .tool-kids button[data-cuts],
+    .subtool-kids .opt {
+      width: 104px; text-align: center; background: rgba(5,16,11,0.92); border: 1px solid #1d4030;
+      color: #7fc79c; font-family: inherit; font-size: 11px; font-weight: bold; letter-spacing: 0.14em;
+      padding: 8px 11px; cursor: pointer; outline: none; white-space: nowrap; }
+    .tool.active > .tool-btn,
+    .subtool.active > .subtool-btn,
+    .tool-kids button[data-axis].active,
+    .tool-kids button[data-dmgstyle].active,
+    .subtool-kids .opt.active {
+      border-color: #5dff9f; color: #5dff9f; background: rgba(93,255,159,0.12); }
+
+    /* level-1 menu (a tool's children) and level-2 menu (a sub-tool's samples): both
+       fixed to the bottom-right, one and two button-columns left of the stack. */
+    .tool-kids { display: none; position: fixed; right: 117px; bottom: 8px; z-index: 105;
+      flex-direction: column; align-items: flex-end; gap: 5px; }
+    .tool.active > .tool-kids { display: flex; }
+    .subtool-kids { display: none; position: fixed; right: 226px; bottom: 8px; z-index: 106;
+      flex-direction: column; align-items: flex-end; gap: 5px; }
+    .subtool.active > .subtool-kids { display: flex; }
+
+    /* COLORS / TEXTURES samples conform to the button shape too: full 104px-wide rows
+       stacked in the same bottom-aligned column, just filled with their colour/texture. */
+    .subtool-kids .sw { width: 104px; height: 33px; padding: 0; background: rgba(5,16,11,0.92);
+      border: 1px solid #1d4030; cursor: pointer; outline: none; }
+    .subtool-kids .sw.tex { background-size: cover; background-position: center; }
+    .subtool-kids .none-sw { display: flex; align-items: center; justify-content: center; color: #7fc79c; font-size: 14px; }
+    .subtool-kids .team-sw { display: flex; align-items: center; justify-content: center; color: #0a1812; font-weight: bold; font-size: 13px; text-shadow: 0 0 2px rgba(255,255,255,0.6); }
+    .subtool-kids .sw.active { border-color: #5dff9f; box-shadow: 0 0 5px rgba(93,255,159,0.5); }
+
+    #hint { position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%); font-size: 10px;
+      letter-spacing: 0.08em; color: #2f5a44; z-index: 90; pointer-events: none; }
+    /* TOP-CENTER: ONE shared box, context-aware. It holds compact horizontal rows
+       (coords / geom params / tiling); each row hides when it isn't relevant, and the
+       whole box hides when they all are. Wide, tight vertical rhythm. */
+    /* centred WITHOUT left:50%+translate (which shrink-wraps a fixed box to ~half the
+       viewport and forced the row to wrap); left/right:0 + margin auto + fit-content lets
+       it grow to its content up to the screen width. */
+    #top-center { position: fixed; top: 42px; left: 0; right: 0; margin: 0 auto; z-index: 100;
+      width: fit-content; max-width: calc(100vw - 12px);
+      display: flex; flex-direction: column; align-items: stretch; gap: 3px;
+      background: rgba(5,16,11,0.93); border: 1px solid #133022; padding: 5px 10px; }
+    #top-center.empty { display: none; }
+    #coords, #geom-params, #mat-params { align-items: center; gap: 5px; font-size: 11px; flex-wrap: wrap; }
+    #coords { display: flex; }
+    #geom-params, #mat-params { display: none; }   /* shown (flex) by JS only when populated */
+    #coords label, #geom-params label, #mat-params label { color: #5dff9f; font-weight: bold; letter-spacing: 0.06em; }
+    #coord-mode, .gmode { color: #9bffc4; font-weight: bold; letter-spacing: 0.08em; font-size: 10px;
+      min-width: 44px; border-right: 1px solid #1d4030; padding-right: 8px; margin-right: 2px; }
+    #coords input, #geom-params input, #mat-params input { width: 52px; background: #0a1812; border: 1px solid #1d4030;
+      color: #cdeede; font-family: inherit; font-size: 11px; padding: 3px 5px; outline: none; }
+    #coords input:disabled { opacity: 0.4; }
+    .ghint { color: #5a8a6f; font-size: 10px; font-style: italic; }
+    /* DAMAGE rows: per-part FALL@ + a global HP scrub slider */
+    #dmg-params, #dmg-hp { display: none; align-items: center; gap: 6px; font-size: 11px; }
+    #dmg-params label { color: #5a8a6f; letter-spacing: 0.06em; }
+    #dmg-params input { width: 52px; background: #0a1812; border: 1px solid #1d4030; color: #cdeede;
+      font-family: inherit; font-size: 11px; padding: 3px 5px; outline: none; }
+    #dmg-slider { flex: 1; min-width: 150px; accent-color: #5dff9f; cursor: pointer; }
+    #dmg-hpval { color: #9bffc4; min-width: 36px; text-align: right; }
+    /* SNAP = one compact button + a pop-open value list (like the COLOR button), so it
+       takes minimal row width instead of a label + a wide dropdown that wrapped on phones. */
+    .snap-wrap { position: relative; margin-left: 4px; }
+    #snap-btn { background: #0a1812; border: 1px solid #1d4030; color: #9bffc4; font-family: inherit;
+      font-size: 11px; letter-spacing: 0.04em; padding: 3px 7px; cursor: pointer; outline: none; white-space: nowrap; }
+    #snap-btn:hover { border-color: #5dff9f; }
+    #snap-pop { display: none; position: absolute; top: 100%; right: 0; margin-top: 3px; z-index: 110;
+      flex-direction: column; background: rgba(5,16,11,0.97); border: 1px solid #1d4030; min-width: 64px; }
+    #snap-pop.open { display: flex; }
+    #snap-pop button { background: transparent; border: none; border-bottom: 1px solid #133022; color: #9fd9b6;
+      font-family: inherit; font-size: 11px; padding: 6px 12px; text-align: left; cursor: pointer; outline: none; }
+    #snap-pop button:last-child { border-bottom: none; }
+    #snap-pop button:hover, #snap-pop button.active { color: #5dff9f; background: rgba(93,255,159,0.1); }
+    #sel-tag { font-size: 10px; letter-spacing: 0.08em; color: #6a9a7f; text-align: right; pointer-events: none; }
+  </style>
+</head>
+<body>
+  <div id="canvas-container"></div>
+
+  <!-- TOP-LEFT: asset list -->
+  <div class="widget" id="w-assets">
+    <button class="wbtn" data-toggle="w-assets">▤ ASSETS</button>
+    <div class="wpanel"><div id="assets-list"></div></div>
+  </div>
+
+  <!-- TOP-CENTER: export / import. Edits autosave to localStorage; this is for
+       manual backup (EXPORT/IMPORT JSON) + RESET to the code default. -->
+  <div class="widget" id="w-export">
+    <button class="wbtn" data-toggle="w-export">⇅ EXPORT</button>
+    <div id="save-dot"></div>
+    <div class="wpanel">
+      <div id="export-panel">
+        <div class="ehint">edits autosave locally · RESET reverts to the original</div>
+        <textarea id="export-text" spellcheck="false" placeholder="asset JSON — Export to fill, or paste + Import"></textarea>
+        <div class="ebtns">
+          <button id="btn-export">EXPORT</button>
+          <button id="btn-import">IMPORT</button>
+          <button id="btn-save">SAVE</button>
+          <button id="btn-reset">RESET</button>
+        </div>
+        <div id="export-msg"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- TOP-RIGHT: team colors -->
+  <div class="widget" id="w-colors">
+    <button class="wbtn" data-toggle="w-colors">◧ COLOR</button>
+    <div class="wpanel"><div id="colors-list"></div></div>
+  </div>
+
+  <!-- LEFT EDGE (~25% down): how a pick combines with the current selection.
+       NORMAL replaces · ADD unions · SUBTRACT removes · ALL selects everything. -->
+  <div class="widget" id="w-selop">
+    <button class="selop-btn active" data-selop="normal" title="NORMAL — a pick replaces the selection">
+      <svg viewBox="0 0 24 24"><path class="icf" d="M6 4 L6 19 L10 15 L13 21 L15 20 L12 14 L18 14 Z"/></svg>
+    </button>
+    <button class="selop-btn" data-selop="add" title="ADD — a pick joins the selection">
+      <svg viewBox="0 0 24 24"><rect class="ic" x="5" y="5" width="14" height="14" rx="1"/>
+        <path class="ic" d="M12 9 V15 M9 12 H15" stroke-width="2.2"/></svg>
+    </button>
+    <button class="selop-btn" data-selop="subtract" title="SUBTRACT — a pick removes from the selection">
+      <svg viewBox="0 0 24 24"><rect class="ic" x="5" y="5" width="14" height="14" rx="1"/>
+        <path class="ic" d="M9 12 H15" stroke-width="2.2"/></svg>
+    </button>
+    <button class="selact-btn" data-selact="all" title="SELECT ALL elements of this mesh">
+      <svg viewBox="0 0 24 24"><rect class="icf" x="5" y="5" width="6" height="6"/><rect class="icf" x="13" y="5" width="6" height="6"/>
+        <rect class="icf" x="5" y="13" width="6" height="6"/><rect class="icf" x="13" y="13" width="6" height="6"/></svg>
+    </button>
+  </div>
+
+  <!-- RIGHT EDGE (~25% down): element-selection mode, Blender-style.
+       OBJECT = whole part · VERTEX/EDGE/FACE = edit sub-geometry of custom meshes. -->
+  <div class="widget" id="w-selmode">
+    <button class="selmode-btn active" data-selmode="object" title="OBJECT — move/scale/rotate the whole part">
+      <svg viewBox="0 0 24 24"><g class="ic" stroke-linejoin="round" stroke-linecap="round">
+        <rect x="5" y="9" width="9" height="9"/><path d="M5 9 L9 5 L18 5 L14 9 M14 18 L18 14 L18 5"/>
+      </g></svg>
+    </button>
+    <button class="selmode-btn" data-selmode="vertex" title="VERTEX — drag individual points">
+      <svg viewBox="0 0 24 24"><rect class="ic" x="6" y="6" width="12" height="12"/>
+        <circle class="icf" cx="6" cy="6" r="2.6"/><circle class="icf" cx="18" cy="6" r="2.6"/>
+        <circle class="icf" cx="6" cy="18" r="2.6"/><circle class="icf" cx="18" cy="18" r="2.6"/></svg>
+    </button>
+    <button class="selmode-btn" data-selmode="edge" title="EDGE — drag a single edge">
+      <svg viewBox="0 0 24 24"><rect class="ic" x="6" y="6" width="12" height="12" opacity="0.45"/>
+        <line class="ic" x1="6" y1="6" x2="18" y2="6" stroke-width="2.6"/>
+        <circle class="icf" cx="6" cy="6" r="2.6"/><circle class="icf" cx="18" cy="6" r="2.6"/></svg>
+    </button>
+    <button class="selmode-btn" data-selmode="face" title="FACE — drag a whole face">
+      <svg viewBox="0 0 24 24"><rect class="icf" x="6" y="6" width="12" height="12" rx="1"/></svg>
+    </button>
+  </div>
+
+  <!-- BOTTOM-LEFT: stats / editable defaults -->
+  <div class="widget" id="w-stats">
+    <button class="wbtn" data-toggle="w-stats">▣ STATS</button>
+    <div class="wpanel">
+      <div id="stats-name">—</div>
+      <div class="srow" id="s-name-row"><label>NAME</label><input id="s-name" type="text" maxlength="28" /></div>
+      <div class="srow"><label>CATEGORY</label><span class="val" id="s-cat">—</span></div>
+      <div class="srow"><label>HP</label><input id="s-hp" type="number" min="0" step="10" /><span class="val" id="s-hptype"></span></div>
+      <div class="srow"><label>FOOTPRINT</label>
+        <input id="s-fw" class="small" type="number" min="1" step="1" /> ×
+        <input id="s-fd" class="small" type="number" min="1" step="1" /> cells</div>
+      <div class="srow"><label>SIZE w·h·d</label><span class="val" id="s-size">—</span></div>
+      <div class="srow"><label>MEASURED</label><span class="val" id="s-meas">—</span></div>
+      <div class="srow"><label>PARTS</label><span class="val" id="s-parts">—</span></div>
+    </div>
+  </div>
+
+  <!-- BOTTOM-RIGHT: edit tools (collapse to a TOOLS button; children fly out left) -->
+  <div class="widget" id="w-tools">
+    <button class="wbtn" data-toggle="w-tools">⚒ TOOLS</button>
+    <div class="wpanel"><div id="tools-stack">
+    <div class="tool" data-tool="add">
+      <button class="tool-btn">+ ADD</button>
+      <div class="tool-kids">
+        <button data-geo="box">BOX</button>
+        <button data-geo="sphere">SPHERE</button>
+        <button data-geo="cylinder">CYL</button>
+        <button data-geo="cone">CONE</button>
+        <button data-geo="plane">PLANE</button>
+      </div>
+    </div>
+    <div class="tool" data-tool="move">
+      <button class="tool-btn">↔ MOVE</button>
+      <div class="tool-kids"><button data-axis="x">X</button><button data-axis="y">Y</button><button data-axis="z">Z</button></div>
+    </div>
+    <div class="tool" data-tool="scale">
+      <button class="tool-btn">⤢ SCALE</button>
+      <div class="tool-kids"><button data-axis="x">X</button><button data-axis="y">Y</button><button data-axis="z">Z</button></div>
+    </div>
+    <div class="tool" data-tool="rotate">
+      <button class="tool-btn">⟳ ROTATE</button>
+      <div class="tool-kids"><button data-axis="x">X</button><button data-axis="y">Y</button><button data-axis="z">Z</button></div>
+    </div>
+    <div class="tool" data-tool="extrude">
+      <button class="tool-btn">↑ EXTRUDE</button>
+    </div>
+    <div class="tool" data-tool="subdivide">
+      <button class="tool-btn">▦ SUBDIV</button>
+      <div class="tool-kids"><button data-cuts="1">1 CUT</button><button data-cuts="2">2 CUTS</button><button data-cuts="3">3 CUTS</button></div>
+    </div>
+    <div class="tool" data-tool="material">
+      <button class="tool-btn">◐ MATERIAL</button>
+      <div class="tool-kids" id="material-kids">
+        <div class="subtool" data-sub="colors"><button class="subtool-btn">COLORS</button><div class="subtool-kids" id="sub-colors"></div></div>
+        <div class="subtool" data-sub="textures"><button class="subtool-btn">TEXTURES</button><div class="subtool-kids" id="sub-textures"></div></div>
+        <div class="subtool" data-sub="specular"><button class="subtool-btn">SPECULAR</button><div class="subtool-kids" id="sub-specular"></div></div>
+        <div class="subtool" data-sub="bump"><button class="subtool-btn">BUMP</button><div class="subtool-kids" id="sub-bump"></div></div>
+      </div>
+    </div>
+    <div class="tool" data-tool="damage">
+      <button class="tool-btn">✸ DAMAGE</button>
+      <div class="tool-kids"><button class="opt" data-dmgstyle="tumble">TUMBLE</button><button class="opt" data-dmgstyle="squish">SQUISH</button></div>
+    </div>
+    <div class="tool" data-tool="delete">
+      <button class="tool-btn">✕ DELETE</button>
+    </div>
+    </div></div>
+  </div>
+
+  <div id="top-center">
+    <div id="coords">
+      <span id="coord-mode">POS</span>
+      <label>X</label><input id="cx" type="number" step="0.1" disabled />
+      <label>Y</label><input id="cy" type="number" step="0.1" disabled />
+      <label>Z</label><input id="cz" type="number" step="0.1" disabled />
+      <span class="snap-wrap">
+        <button id="snap-btn" type="button" title="snap grid">⊞ SNAP</button>
+        <div id="snap-pop">
+          <button data-snap="0">none</button>
+          <button data-snap="1">1</button>
+          <button data-snap="0.5">0.5</button>
+          <button data-snap="0.1">0.1</button>
+        </div>
+      </span>
+    </div>
+    <div id="geom-params"></div>
+    <div id="mat-params"></div>
+    <div id="dmg-params"></div>
+    <div id="dmg-hp"></div>
+    <div id="sel-tag"></div>
+  </div>
+  <div id="hint">TAP MESH = SELECT&nbsp;•&nbsp;DRAG = ORBIT&nbsp;•&nbsp;PINCH = ZOOM</div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+  <script type="module" src="js/main.js?v=29"></script>
+</body>
+</html>

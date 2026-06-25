@@ -1,0 +1,1317 @@
+// Asset Designer — view AND EDIT the placeable assets from the shared manifest.
+// Loads an asset's code-built meshes as editable "parts" (frozen geometry, so
+// curved/jittered code geometry round-trips exactly), lets you add primitives,
+// select by raycast, move/scale/rotate per axis, recolour, edit metadata
+// (HP/footprint), and save/export/import a JSON config per asset.
+//
+// Dependency is ONE WAY: imports from ../../riposte-run/; the game never imports
+// from here. Mobile-friendly collapsing widgets in each corner + pinch-zoom.
+
+import * as THREE from 'three';
+import { ASSETS } from '../../riposte-run/js/assets.manifest.js?v=4';
+import { TEAM_COLORS } from '../../riposte-run/js/CamoTexture.js';
+import { concreteTexture, ribbedMetalTexture, fabricTexture, crateTexture, roofTexture, accentPlateTexture, hazardTexture } from '../../riposte-run/js/Textures.js?v=2';
+
+// Procedural textures available to apply in the MATERIAL menu.
+const TEX = {
+  concrete: () => concreteTexture(), metal: () => ribbedMetalTexture(), fabric: () => fabricTexture(),
+  crate: () => crateTexture(), roof: () => roofTexture(), accent: () => accentPlateTexture(),
+  hazard: () => hazardTexture(),
+};
+
+const CELL = 5;
+const SLOP = 9;   // px a press may wander and still count as a tap (select)
+
+// ── Scene / renderer ─────────────────────────────────────────────────────────
+const container = document.getElementById('canvas-container');
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(container.clientWidth, container.clientHeight);
+renderer.setClearColor(0x000000, 0);
+container.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a1812);
+scene.add(new THREE.DirectionalLight(0xffeebb, 3.6).translateX(18).translateY(26).translateZ(14));
+const fill = new THREE.DirectionalLight(0x88bbee, 1.8); fill.position.set(-12, 10, -14); scene.add(fill);
+scene.add(new THREE.AmbientLight(0x88aa99, 2.6));
+
+const gridHelper = new THREE.GridHelper(CELL * 12, 12, 0x1d4030, 0x12281d);
+scene.add(gridHelper);
+
+const model = new THREE.Group();   // the editable parts live here
+scene.add(model);
+
+const selBox = new THREE.Box3Helper(new THREE.Box3(), 0xffd24a);
+selBox.visible = false; scene.add(selBox);
+
+// ── Camera (orbit around a target) ───────────────────────────────────────────
+const camera = new THREE.PerspectiveCamera(48, container.clientWidth / container.clientHeight, 0.1, 600);
+const target = new THREE.Vector3(0, 2, 0);
+let camTheta = 0.72, camPhi = 0.95, camRadius = 22;
+function updateCamera() {
+  camera.position.set(
+    target.x + Math.sin(camTheta) * Math.sin(camPhi) * camRadius,
+    target.y + Math.cos(camPhi) * camRadius,
+    target.z + Math.cos(camTheta) * Math.sin(camPhi) * camRadius);
+  camera.lookAt(target);
+}
+window.setCameraView = ({ theta, phi, radius } = {}) => {
+  if (theta != null) camTheta = theta; if (phi != null) camPhi = phi; if (radius != null) camRadius = radius;
+  updateCamera();
+};
+
+// ── State ─────────────────────────────────────────────────────────────────────
+let activeIndex = 0;
+let accentIndex = 0;
+let selIndex = -1;
+let toolMode = null;   // 'add' | 'move' | 'scale' | 'rotate' | 'material' | null
+let matSub = null;     // which MATERIAL sub-tool is open: 'colors'|'textures'|'specular'|'bump'|null
+let dmgPreviewHP = 1;  // DAMAGE-tool preview health (1 = intact .. 0 = destroyed)
+let toolAxis = null;   // 'x' | 'y' | 'z'
+// Blender-style element-selection mode (the right-side icon toolbar):
+//   'object' = transform the whole part; 'vertex'/'edge'/'face' = edit sub-geometry.
+let selMode = 'object';
+const elemMode = () => selMode !== 'object';
+let thumb = false;
+const meta = { id: '', name: '', category: '', accent: true, hp: 0, type: 'building', fw: 1, fd: 1 };
+
+const parts = () => model.children;   // each child mesh = a part; userData holds {kind, params, mat}
+
+// ── Material (de)serialise ───────────────────────────────────────────────────
+// Serialise a texture to a data URL so it round-trips (covers both the assets'
+// original baked textures and ones applied from the MATERIAL menu).
+function texToURL(tex) {
+  if (!tex) return null;
+  if (tex.userData && tex.userData.src) return tex.userData.src;
+  try { if (tex.image && tex.image.toDataURL) return tex.image.toDataURL(); } catch (e) { /* tainted */ }
+  return tex.image && tex.image.src ? tex.image.src : null;
+}
+// Build a THREE.Texture from a data-URL (with tiling), for any map slot.
+function texFromURL(url, tile) {
+  const img = new Image();
+  const t = new THREE.Texture(img);
+  t.colorSpace = THREE.SRGBColorSpace; t.userData = { src: url };
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  if (tile) t.repeat.set(tile[0], tile[1]);
+  img.onload = () => { t.needsUpdate = true; };
+  img.src = url;
+  return t;
+}
+function applyMapURL(mat, url, tile) { if (url) { mat.map = texFromURL(url, tile); mat.needsUpdate = true; } }
+// Build a fresh procedural texture (TEX[kind]) at the part's tiling; returns {tex,url}.
+function buildTex(kind, tile) {
+  const tex = TEX[kind](); let url = null; try { url = tex.image.toDataURL(); } catch (e) { /* tainted */ }
+  tex.userData = { src: url }; tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  if (tile) tex.repeat.set(tile[0], tile[1]);
+  return { tex, url };
+}
+function matInfo(m) {
+  const anyMap = m.map || m.bumpMap || m.roughnessMap;
+  return {
+    kind: m.isMeshBasicMaterial ? 'basic' : 'standard',
+    color: '#' + m.color.getHexString(),
+    roughness: m.roughness ?? 1, metalness: m.metalness ?? 0, flatShading: !!m.flatShading,
+    emissive: m.emissive ? '#' + m.emissive.getHexString() : null, emissiveIntensity: m.emissiveIntensity ?? 0,
+    opacity: m.opacity ?? 1, transparent: !!m.transparent,
+    map: texToURL(m.map),
+    // bump + spec are now INDEPENDENT map slots (their own texture, no colour map needed);
+    // one shared tiling drives whichever maps are present.
+    tile: anyMap ? [anyMap.repeat.x, anyMap.repeat.y] : null,
+    bumpTex: texToURL(m.bumpMap), bumpScale: m.bumpScale ?? 0.4, specTex: texToURL(m.roughnessMap),
+  };
+}
+function makeMat(info) {
+  const base = { color: info.color, transparent: info.transparent, opacity: info.opacity, side: THREE.DoubleSide };
+  let mat;
+  if (info.kind === 'basic') mat = new THREE.MeshBasicMaterial(base);
+  else {
+    mat = new THREE.MeshStandardMaterial({ ...base, roughness: info.roughness, metalness: info.metalness, flatShading: info.flatShading });
+    if (info.emissive) { mat.emissive = new THREE.Color(info.emissive); mat.emissiveIntensity = info.emissiveIntensity; }
+  }
+  const tile = info.tile;
+  if (info.map) applyMapURL(mat, info.map, tile);
+  if (info.bumpTex) { mat.bumpMap = texFromURL(info.bumpTex, tile); mat.bumpScale = info.bumpScale ?? 0.4; }
+  else if (info.bump && mat.map) { mat.bumpMap = mat.map; mat.bumpScale = info.bumpScale ?? 0.4; }   // legacy: shared colour map
+  if (mat.isMeshStandardMaterial) {
+    if (info.specTex) mat.roughnessMap = texFromURL(info.specTex, tile);
+    else if (info.spec && mat.map) mat.roughnessMap = mat.map;   // legacy
+  }
+  return mat;
+}
+
+// ── Primitive geometry from a spec ───────────────────────────────────────────
+// Editable parameter schema per primitive: [key, label, default]. (Cylinder
+// top/bottom radius let you make cones; 0 top radius = a point.)
+const GEO_PARAMS = {
+  box: [['w', 'width', 2], ['h', 'height', 2], ['d', 'depth', 2]],
+  sphere: [['r', 'radius', 1.4], ['detail', 'detail', 1]],
+  cylinder: [['rt', 'top radius', 1], ['rb', 'bottom radius', 1], ['h', 'height', 3], ['seg', 'segments', 14]],
+  cone: [['r', 'radius', 1.2], ['h', 'height', 3], ['seg', 'segments', 14]],
+  plane: [['w', 'width', 3], ['h', 'height', 3]],
+};
+function defaultParams(kind) { const p = {}; for (const [k, , d] of (GEO_PARAMS[kind] || [])) p[k] = d; return p; }
+function makeGeo(kind, p = {}) {
+  switch (kind) {
+    case 'box': return new THREE.BoxGeometry(p.w ?? 2, p.h ?? 2, p.d ?? 2);
+    case 'sphere': return new THREE.IcosahedronGeometry(p.r ?? 1.4, p.detail ?? 1);
+    case 'cylinder': return new THREE.CylinderGeometry(p.rt ?? 1, p.rb ?? 1, p.h ?? 3, p.seg ?? 14);
+    case 'cone': return new THREE.ConeGeometry(p.r ?? 1.2, p.h ?? 3, p.seg ?? 14);
+    case 'plane': return new THREE.PlaneGeometry(p.w ?? 3, p.h ?? 3);
+    default: return new THREE.BoxGeometry(2, 2, 2);
+  }
+}
+
+// Map an existing geometry to an editable primitive so decomposed asset meshes
+// expose their real params. Returns null for shapes we can't parametrise
+// (extrusions, torus, merged buffers) — those stay frozen (SCALE only).
+function readGeo(g) {
+  const t = g.type, p = g.parameters || {};
+  if (t === 'BoxGeometry') return { kind: 'box', params: { w: p.width, h: p.height, d: p.depth } };
+  if (t === 'CylinderGeometry') return { kind: 'cylinder', params: { rt: p.radiusTop, rb: p.radiusBottom, h: p.height, seg: p.radialSegments } };
+  if (t === 'ConeGeometry') return { kind: 'cone', params: { r: p.radius, h: p.height, seg: p.radialSegments } };
+  if (t === 'IcosahedronGeometry') return { kind: 'sphere', params: { r: p.radius, detail: p.detail } };
+  if (t === 'PlaneGeometry') return { kind: 'plane', params: { w: p.width, h: p.height } };
+  return null;
+}
+
+// Add one part mesh. If `geometry` is given it's rendered as-is (exact original);
+// otherwise the geometry is built from kind+params. `parametric` marks whether
+// the live geometry came from params (so export/edit treat it as editable).
+function addPart({ kind, params, geometry, pos, rot, scale, mat, parametric, fallAt, dmgStyle }) {
+  const hasGeo = geometry != null;
+  const geo = hasGeo
+    ? (geometry instanceof THREE.BufferGeometry ? geometry : new THREE.BufferGeometryLoader().parse(geometry))
+    : makeGeo(kind, params);
+  const mesh = new THREE.Mesh(geo, makeMat(mat));
+  if (pos) mesh.position.fromArray(pos);
+  if (rot) mesh.rotation.set(rot[0], rot[1], rot[2]);
+  if (scale) mesh.scale.fromArray(scale);
+  mesh.userData = {
+    kind, params: params || null, mat, parametric: parametric !== undefined ? parametric : (!hasGeo && kind !== 'frozen'),
+    // DESTRUCTION STAGING: fallAt = HP fraction (0..1) at/below which this part lets go;
+    // dmgStyle = how it goes ('tumble' = explode outward, 'squish' = pancake flat). 0 = only at death.
+    fallAt: fallAt ?? 0, dmgStyle: dmgStyle || 'tumble',
+  };
+  model.add(mesh);
+  return mesh;
+}
+
+// ── Load an asset → parts ────────────────────────────────────────────────────
+function buildFromMake(asset) {
+  const accentHex = '#' + new THREE.Color(TEAM_COLORS[accentIndex].hex).getHexString();
+  const g = asset.make(CELL, new THREE.Color(TEAM_COLORS[accentIndex].hex));
+  g.updateMatrixWorld(true);
+  const pos = new THREE.Vector3(), q = new THREE.Quaternion(), s = new THREE.Vector3();
+  g.traverse(o => {
+    if (!o.isMesh) return;
+    o.matrixWorld.decompose(pos, q, s);
+    const e = new THREE.Euler().setFromQuaternion(q);
+    const info = matInfo(Array.isArray(o.material) ? o.material[0] : o.material);
+    // parts drawn in the accent colour follow the team colour automatically
+    if (info.color.toLowerCase() === accentHex.toLowerCase()) info.team = true;
+    // recognise clean primitives so their params are editable; otherwise freeze.
+    const mapped = readGeo(o.geometry);
+    addPart({
+      // render the EXACT original geometry (plain BufferGeometry copy — captures
+      // baked verts AND serialises with `.data`); kind/params let it be edited.
+      kind: mapped ? mapped.kind : 'frozen', params: mapped ? mapped.params : null,
+      geometry: new THREE.BufferGeometry().copy(o.geometry),
+      pos: pos.toArray(), rot: [e.x, e.y, e.z], scale: s.toArray(), mat: info, parametric: false,
+    });
+  });
+}
+
+function clearModel() { clearVertHandles(); while (model.children.length) { const m = model.children[0]; model.remove(m); m.geometry.dispose(); } selIndex = -1; selBox.visible = false; }
+
+function loadAsset(i, { fresh = false } = {}) {
+  flushSave();   // persist the asset we're leaving before we swap it out
+  activeIndex = i;
+  try { localStorage.setItem('assetdesigner:_last', String(i)); } catch (e) { /* private mode */ }
+  const a = allAssets()[i];
+  meta.id = a.id; meta.name = a.name; meta.category = a.category; meta.accent = a.accent;
+  meta.hp = a.destructible ? a.destructible.hp : 0; meta.type = a.destructible ? a.destructible.type : '—';
+  meta.fw = a.footprint.w; meta.fd = a.footprint.d;
+  clearModel();
+
+  // manifest assets rebuild from their code maker; brand-new user assets have no
+  // maker, so they fall back to a single starter box.
+  const saved = !fresh && localStorage.getItem('assetdesigner:' + a.id);
+  if (saved) { try { importConfig(JSON.parse(saved), { silent: true }); } catch (e) { a.make ? buildFromMake(a) : addMesh('box'); } }
+  else if (a.make) buildFromMake(a);
+  else addMesh('box');
+
+  frameModel();
+  if (dmgActive()) { dmgSnapshot(); dmgPreviewHP = 1; }   // switched assets mid-DAMAGE: re-arm the preview
+  refreshAssetTabs(); refreshStats();
+}
+
+function frameModel() {
+  const box = new THREE.Box3().setFromObject(model);
+  if (box.isEmpty()) { target.set(0, 2, 0); camRadius = 22; updateCamera(); return; }
+  const size = new THREE.Vector3(); box.getSize(size);
+  target.set(0, size.y * 0.5, 0);
+  const sph = new THREE.Sphere(); box.getBoundingSphere(sph);
+  camRadius = Math.max(sph.radius * (thumb ? 2.05 : 3.3), thumb ? 6 : 14);
+  updateCamera();
+}
+
+// ── Selection ─────────────────────────────────────────────────────────────────
+const raycaster = new THREE.Raycaster();
+function raycastSelect(px, py) {
+  const r = renderer.domElement.getBoundingClientRect();
+  const ndc = new THREE.Vector2(((px - r.left) / r.width) * 2 - 1, -((py - r.top) / r.height) * 2 + 1);
+  raycaster.setFromCamera(ndc, camera);
+  const hit = raycaster.intersectObjects(parts(), false)[0];
+  selIndex = hit ? parts().indexOf(hit.object) : -1;
+  updateSel();
+}
+function updateSel() {
+  const m = parts()[selIndex];
+  if (m) { selBox.box.setFromObject(m); selBox.visible = !thumb; document.getElementById('sel-tag').textContent = `▣ part ${selIndex + 1}/${parts().length}`; }
+  else { selBox.visible = false; document.getElementById('sel-tag').textContent = ''; }
+  refreshStats();
+  refreshGeomParams();
+  refreshMatParams();
+  refreshDmgParams();
+  syncMapButtons();
+}
+
+// ── Transform (axis-constrained drag) ────────────────────────────────────────
+const transformActive = () => !elemMode() && (toolMode === 'move' || toolMode === 'scale' || toolMode === 'rotate') && toolAxis && parts()[selIndex];
+// Snap increment (0 = off): quantises drag-adjustments + typed values to a grid.
+let snap = 0;
+function snapVal(v) { return snap > 0 ? +(Math.round(v / snap) * snap).toFixed(4) : v; }
+function applyTransform(dx) {
+  const m = parts()[selIndex]; if (!m) return;
+  if (toolMode === 'move') m.position[toolAxis] = snapVal(m.position[toolAxis] + dx * 0.04);
+  else if (toolMode === 'scale') m.scale[toolAxis] = Math.max(0.05, snapVal(m.scale[toolAxis] + dx * 0.012));
+  else if (toolMode === 'rotate') m.rotation[toolAxis] = snapVal(m.rotation[toolAxis] * 180 / Math.PI + dx * 1.2) * Math.PI / 180;   // snap in degrees
+  selBox.box.setFromObject(m);
+  refreshStats();
+}
+
+// ── Vertex editing (sub-object) ──────────────────────────────────────────────
+// VERTEX mode lets you push individual vertices around to make custom shapes.
+// Coincident verts are WELDED (grouped by position) so a corner shared by
+// several faces moves as one and the mesh stays watertight. A part becomes a
+// FROZEN custom geometry the moment a vertex is edited (so it exports its exact
+// verts, not a primitive's params).
+const AXIS_COMP = { x: 0, y: 1, z: 2 };
+// The selection is a LIST of elements; each element is an array of welded-group
+// indices (1 = vertex, 2 = edge, 3 = face triangle). The left-side toolbar sets
+// how a fresh pick combines with it: NORMAL replaces, ADD unions, SUBTRACT removes
+// (+ a SELECT-ALL action). So you can grab e.g. both triangles of a quad.
+let selElems = [];          // array of group-index arrays
+let selOp = 'normal';       // 'normal' | 'add' | 'subtract'
+let vertGroups = null;      // array of arrays: position-attribute indices sharing a position
+let groupOfIndex = null;    // Map: original position-attribute index -> its welded group index
+let vertHandles = null;     // THREE.Points overlay (child of the selected mesh)
+let vertHilite = null;      // marker Points for the selected elements' vertices
+let elemLine = null;        // overlay line segments for selected edges / faces
+
+function clearVertHandles() {
+  for (const h of [vertHandles, vertHilite, elemLine]) {
+    if (h) { if (h.parent) h.parent.remove(h); h.geometry.dispose(); h.material.dispose(); }
+  }
+  vertHandles = vertHilite = elemLine = null;
+  selElems = []; vertGroups = null; groupOfIndex = null;
+}
+const vertexActive = () => elemMode();
+const elemSig = a => [...a].sort((x, y) => x - y).join(',');
+// Combine a freshly-picked element into the selection per the active op.
+function applyPick(groups) {
+  if (!groups) return false;
+  const s = elemSig(groups);
+  if (selOp === 'subtract') selElems = selElems.filter(e => elemSig(e) !== s);
+  else if (selOp === 'add') { if (!selElems.some(e => elemSig(e) === s)) selElems.push(groups); }
+  else selElems = [groups];
+  updateElemHilite(); updateHint(); return true;
+}
+// The unique welded groups every selected element touches (drives the transforms).
+function selGroupSet() {
+  const set = new Set();
+  for (const e of selElems) for (const g of e) set.add(g);
+  return [...set];
+}
+const hasSel = () => selElems.length > 0;
+// VERTEX coord boxes only make sense for exactly one picked vertex.
+function singleVertGroup() {
+  return (selMode === 'vertex' && selElems.length === 1 && selElems[0].length === 1) ? selElems[0][0] : -1;
+}
+const elemDragActive = () => elemMode() && (toolMode === 'move' || toolMode === 'scale' || toolMode === 'rotate')
+  && toolAxis && parts()[selIndex] && hasSel();
+
+// Build the green handle cloud for the selected mesh, welding coincident verts.
+function buildVertHandles() {
+  clearVertHandles();
+  const m = parts()[selIndex]; if (!m) return;
+  const pos = m.geometry.attributes.position; if (!pos) return;
+  const map = new Map(); vertGroups = []; groupOfIndex = new Map();
+  for (let i = 0; i < pos.count; i++) {
+    const key = pos.getX(i).toFixed(4) + ',' + pos.getY(i).toFixed(4) + ',' + pos.getZ(i).toFixed(4);
+    let g = map.get(key);
+    if (!g) { g = []; map.set(key, g); vertGroups.push(g); }
+    g.push(i);
+  }
+  vertGroups.forEach((g, k) => g.forEach(i => groupOfIndex.set(i, k)));
+  const arr = new Float32Array(vertGroups.length * 3);
+  vertGroups.forEach((g, k) => { arr[k * 3] = pos.getX(g[0]); arr[k * 3 + 1] = pos.getY(g[0]); arr[k * 3 + 2] = pos.getZ(g[0]); });
+  const hg = new THREE.BufferGeometry(); hg.setAttribute('position', new THREE.BufferAttribute(arr, 3));
+  vertHandles = new THREE.Points(hg, new THREE.PointsMaterial({ color: 0x5dff9f, size: 12, sizeAttenuation: false, depthTest: false, transparent: true }));
+  vertHandles.renderOrder = 998; m.add(vertHandles);
+  const sg = new THREE.BufferGeometry(); sg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(9), 3));
+  vertHilite = new THREE.Points(sg, new THREE.PointsMaterial({ color: 0xffd24a, size: 19, sizeAttenuation: false, depthTest: false, transparent: true }));
+  vertHilite.renderOrder = 999; vertHilite.visible = false; m.add(vertHilite);
+}
+
+// Pick the element under the cursor for the active selMode → its group array (or null).
+function pickElement(px, py) {
+  const m = parts()[selIndex]; if (!m) return null;
+  const r = renderer.domElement.getBoundingClientRect();
+  const ndc = new THREE.Vector2(((px - r.left) / r.width) * 2 - 1, -((py - r.top) / r.height) * 2 + 1);
+  raycaster.setFromCamera(ndc, camera);
+  if (selMode === 'vertex') {   // nearest welded handle from the green cloud
+    if (!vertHandles) return null;
+    raycaster.params.Points.threshold = camRadius * 0.045;
+    const hit = raycaster.intersectObject(vertHandles, false)[0];
+    return hit ? [hit.index] : null;
+  }
+  if (!groupOfIndex) return null;   // edge/face: raycast the mesh triangle
+  const hit = raycaster.intersectObject(m, false)[0];
+  if (!hit || !hit.face) return null;
+  const f = hit.face;
+  if (selMode === 'face') return [groupOfIndex.get(f.a), groupOfIndex.get(f.b), groupOfIndex.get(f.c)];
+  // edge: closest of the triangle's 3 sides to the (local) hit point
+  const pos = m.geometry.attributes.position, lp = m.worldToLocal(hit.point.clone());
+  const v = i => new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i));
+  const sides = [[f.a, f.b], [f.b, f.c], [f.c, f.a]];
+  let best = Infinity, pick = sides[0];
+  for (const s of sides) { const d = distToSeg(lp, v(s[0]), v(s[1])); if (d < best) { best = d; pick = s; } }
+  return [groupOfIndex.get(pick[0]), groupOfIndex.get(pick[1])];
+}
+function distToSeg(p, a, b) {
+  const ab = b.clone().sub(a), t = THREE.MathUtils.clamp(p.clone().sub(a).dot(ab) / (ab.lengthSq() || 1), 0, 1);
+  return p.distanceTo(a.clone().add(ab.multiplyScalar(t)));
+}
+// SELECT ALL: every vertex / unique edge / unique face triangle of the current mesh.
+function selectAllElements() {
+  const m = parts()[selIndex]; if (!m || !elemMode()) return;
+  buildVertHandles();
+  if (selMode === 'vertex') { selElems = vertGroups.map((_, k) => [k]); }
+  else {
+    selElems = []; const seen = new Set();
+    const addTri = (a, b, c) => {
+      const ga = groupOfIndex.get(a), gb = groupOfIndex.get(b), gc = groupOfIndex.get(c);
+      if (selMode === 'face') { const s = elemSig([ga, gb, gc]); if (!seen.has(s)) { seen.add(s); selElems.push([ga, gb, gc]); } }
+      else [[ga, gb], [gb, gc], [gc, ga]].forEach(pr => { const s = elemSig(pr); if (!seen.has(s)) { seen.add(s); selElems.push(pr); } });
+    };
+    const idx = m.geometry.index;
+    if (idx) { for (let i = 0; i < idx.count; i += 3) addTri(idx.getX(i), idx.getX(i + 1), idx.getX(i + 2)); }
+    else { const c = m.geometry.attributes.position.count; for (let i = 0; i < c; i += 3) addTri(i, i + 1, i + 2); }
+  }
+  updateElemHilite(); refreshCoords(); updateHint();
+}
+// Highlight every selected element: yellow points on its verts + a loop per edge/face.
+function updateElemHilite() {
+  const m = parts()[selIndex];
+  if (!m || !vertHilite) return;
+  const groups = selGroupSet(), pos = m.geometry.attributes.position;
+  const need = Math.max(3, groups.length) * 3;
+  if (vertHilite.geometry.attributes.position.array.length < need)
+    vertHilite.geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(need), 3));
+  const arr = vertHilite.geometry.attributes.position.array;
+  groups.forEach((g, k) => { const i = vertGroups[g][0]; arr[k * 3] = pos.getX(i); arr[k * 3 + 1] = pos.getY(i); arr[k * 3 + 2] = pos.getZ(i); });
+  vertHilite.geometry.setDrawRange(0, groups.length);
+  vertHilite.geometry.attributes.position.needsUpdate = true;
+  vertHilite.visible = groups.length > 0;
+  if (elemLine) { if (elemLine.parent) elemLine.parent.remove(elemLine); elemLine.geometry.dispose(); elemLine.material.dispose(); elemLine = null; }
+  const seg = [], gp = g => { const i = vertGroups[g][0]; return new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i)); };
+  for (const e of selElems) { if (e.length < 2) continue; for (let k = 0; k < e.length; k++) seg.push(gp(e[k]), gp(e[(k + 1) % e.length])); }
+  if (seg.length) {
+    elemLine = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(seg), new THREE.LineBasicMaterial({ color: 0xffd24a, depthTest: false, transparent: true }));
+    elemLine.renderOrder = 999; m.add(elemLine);
+  }
+}
+const updateVertHilite = updateElemHilite;   // back-compat alias for the headless hooks
+// Once vertices are moved the part is a one-off mesh — freeze it so it exports
+// its real geometry (toJSON) and the param editor stops offering to rebuild it.
+function markCustom(m) {
+  m.userData.kind = 'frozen'; m.userData.params = null; m.userData.parametric = false;
+  // a typed subclass (BoxGeometry, …) serialises to PARAMETRIC form which the
+  // loader can't reparse — bake it to a plain BufferGeometry so toJSON has .data.
+  if (m.geometry.constructor !== THREE.BufferGeometry) {
+    const plain = new THREE.BufferGeometry().copy(m.geometry);
+    m.geometry.dispose(); m.geometry = plain;
+  }
+}
+
+function setVertexComponent(comp, v) {
+  const m = parts()[selIndex]; const g = singleVertGroup(); if (!m || g < 0) return;
+  const pos = m.geometry.attributes.position;
+  for (const i of vertGroups[g]) pos.setComponent(i, comp, v);
+  pos.needsUpdate = true; m.geometry.computeVertexNormals();
+  markCustom(m); syncHandles(m); updateElemHilite();
+  selBox.box.setFromObject(m); refreshStats();
+}
+// Re-read every green handle from the (possibly moved) geometry.
+function syncHandles(m) {
+  if (!vertHandles) return;
+  const pos = m.geometry.attributes.position, hp = vertHandles.geometry.attributes.position;
+  vertGroups.forEach((g, k) => hp.setXYZ(k, pos.getX(g[0]), pos.getY(g[0]), pos.getZ(g[0])));
+  hp.needsUpdate = true;
+}
+// MOVE / SCALE / ROTATE the selected element (vertex/edge/face) along the active axis.
+// SCALE & ROTATE pivot about the element's own centroid.
+function applyElementTransform(dx) {
+  const m = parts()[selIndex]; const groups = selGroupSet(); if (!m || !groups.length) return;
+  const pos = m.geometry.attributes.position, comp = AXIS_COMP[toolAxis];
+  const idxs = []; for (const g of groups) for (const i of vertGroups[g]) idxs.push(i);
+  if (toolMode === 'move') {
+    const d = snap > 0 ? snapVal(dx * 0.04) : dx * 0.04;
+    for (const i of idxs) pos.setComponent(i, comp, pos.getComponent(i, comp) + d);
+  } else if (toolMode === 'scale') {
+    const c = elemCentroid(pos, idxs), f = Math.max(0.02, 1 + dx * 0.01);
+    for (const i of idxs) pos.setComponent(i, comp, c[comp] + (pos.getComponent(i, comp) - c[comp]) * f);
+  } else {   // rotate about the centroid, around the chosen axis
+    const c = elemCentroid(pos, idxs), ang = dx * 0.02;
+    const [u, w] = comp === 0 ? [1, 2] : comp === 1 ? [0, 2] : [0, 1];
+    const cs = Math.cos(ang), sn = Math.sin(ang);
+    for (const i of idxs) {
+      const du = pos.getComponent(i, u) - c[u], dw = pos.getComponent(i, w) - c[w];
+      pos.setComponent(i, u, c[u] + du * cs - dw * sn);
+      pos.setComponent(i, w, c[w] + du * sn + dw * cs);
+    }
+  }
+  pos.needsUpdate = true; m.geometry.computeVertexNormals();
+  markCustom(m); syncHandles(m); updateElemHilite();
+  selBox.box.setFromObject(m); refreshStats();
+  if (selMode === 'vertex') refreshCoords();
+}
+function elemCentroid(pos, idxs) {
+  const c = [0, 0, 0];
+  for (const i of idxs) { c[0] += pos.getX(i); c[1] += pos.getY(i); c[2] += pos.getZ(i); }
+  return [c[0] / idxs.length, c[1] / idxs.length, c[2] / idxs.length];
+}
+
+// ── EXTRUDE / SUBDIVIDE (mesh-building tools) ────────────────────────────────
+// Read the mesh as explicit triangles, each carrying its 3 welded-group indices
+// (so we can tell which triangles the face-selection covers).
+function readTriangles(m) {
+  const pos = m.geometry.attributes.position, idx = m.geometry.index, tris = [];
+  const get = i => new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i));
+  const push = (a, b, c) => tris.push({
+    v: [get(a), get(b), get(c)],
+    g: groupOfIndex ? [groupOfIndex.get(a), groupOfIndex.get(b), groupOfIndex.get(c)] : null,
+  });
+  if (idx) for (let i = 0; i < idx.count; i += 3) push(idx.getX(i), idx.getX(i + 1), idx.getX(i + 2));
+  else for (let i = 0; i < pos.count; i += 3) push(i, i + 1, i + 2);
+  return tris;
+}
+// Replace the mesh with a fresh non-indexed triangle soup (a flat list of Vector3s,
+// 3 per triangle), re-weld handles, freeze it. Caller manages the selection after.
+function commitTriangleSoup(m, pts) {
+  const arr = new Float32Array(pts.length * 3);
+  pts.forEach((p, i) => { arr[i * 3] = p.x; arr[i * 3 + 1] = p.y; arr[i * 3 + 2] = p.z; });
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(arr, 3));
+  g.computeVertexNormals();
+  m.geometry.dispose(); m.geometry = g;
+  m.userData.kind = 'frozen'; m.userData.params = null; m.userData.parametric = false;
+  buildVertHandles();   // re-weld + rebuild the green handle cloud (clears selElems)
+  selBox.box.setFromObject(m); refreshStats();
+}
+// Re-select faces by their (post-rebuild) world positions — used to keep the new
+// cap selected right after an extrude.
+function reselectFaces(triples) {
+  const m = parts()[selIndex]; if (!m || !vertGroups) return;
+  const pos = m.geometry.attributes.position, key = new Map();
+  const K = (x, y, z) => x.toFixed(4) + ',' + y.toFixed(4) + ',' + z.toFixed(4);
+  vertGroups.forEach((grp, k) => { const i = grp[0]; key.set(K(pos.getX(i), pos.getY(i), pos.getZ(i)), k); });
+  selElems = [];
+  for (const t of triples) {
+    const gs = t.map(v => key.get(K(v.x, v.y, v.z)));
+    if (gs.every(x => x != null)) selElems.push(gs);
+  }
+  updateElemHilite();
+}
+const selectedFaceSigs = () => new Set(selElems.filter(e => e.length === 3).map(elemSig));
+// SUBDIVIDE: split each selected face triangle into a (cuts+1)² grid of triangles.
+// With nothing selected, subdivide the whole mesh.
+function subdivideMesh(cuts) {
+  const m = parts()[selIndex]; if (!m) return;
+  const sigs = selectedFaceSigs(), anySel = sigs.size > 0;
+  const tris = readTriangles(m), out = [], k = cuts + 1;
+  const sub = (A, B, C) => {
+    const P = (a, b) => A.clone().multiplyScalar(1 - a / k - b / k).add(B.clone().multiplyScalar(a / k)).add(C.clone().multiplyScalar(b / k));
+    for (let i = 0; i < k; i++) for (let j = 0; j < k - i; j++) {
+      out.push(P(i, j), P(i + 1, j), P(i, j + 1));
+      if (i + j < k - 1) out.push(P(i + 1, j), P(i + 1, j + 1), P(i, j + 1));
+    }
+  };
+  for (const t of tris) {
+    if (anySel && (!t.g || !sigs.has(elemSig(t.g)))) { out.push(t.v[0], t.v[1], t.v[2]); continue; }
+    sub(t.v[0], t.v[1], t.v[2]);
+  }
+  commitTriangleSoup(m, out);
+  selElems = []; updateElemHilite(); updateHint();
+}
+// EXTRUDE: pull the selected face region out along its average normal, walling the
+// boundary edges, and keep the new cap selected so MOVE/SCALE can fine-tune it.
+function extrudeSelection() {
+  const m = parts()[selIndex]; if (!m) return;
+  const sigs = selectedFaceSigs();
+  if (!sigs.size) { document.getElementById('hint').textContent = 'EXTRUDE needs a FACE selected'; return; }
+  const tris = readTriangles(m);
+  const selTris = tris.filter(t => t.g && sigs.has(elemSig(t.g)));
+  const unsel = tris.filter(t => !(t.g && sigs.has(elemSig(t.g))));
+  // average region normal + a sensible default push distance
+  const normal = new THREE.Vector3(), bb = new THREE.Box3();
+  for (const t of selTris) {
+    normal.add(new THREE.Vector3().crossVectors(t.v[1].clone().sub(t.v[0]), t.v[2].clone().sub(t.v[0])));
+    t.v.forEach(v => bb.expandByPoint(v));
+  }
+  if (normal.lengthSq() < 1e-9) normal.set(0, 1, 0);
+  normal.normalize();
+  const size = new THREE.Vector3(); bb.getSize(size);
+  const dist = Math.max(0.3, Math.max(size.x, size.y, size.z) * 0.5);
+  const offset = normal.multiplyScalar(dist);
+  // one new (offset) vertex per touched welded group → shared verts stay shared
+  const newPos = new Map();
+  for (const t of selTris) t.g.forEach((g, i) => { if (!newPos.has(g)) newPos.set(g, t.v[i].clone().add(offset)); });
+  const out = [], cap = [];
+  unsel.forEach(t => out.push(t.v[0], t.v[1], t.v[2]));
+  for (const t of selTris) { const c = t.g.map(g => newPos.get(g)); out.push(c[0], c[1], c[2]); cap.push(c); }
+  // wall every BOUNDARY edge (used by exactly one selected triangle)
+  const cnt = new Map(), dir = new Map(), ek = (a, b) => a < b ? a + '_' + b : b + '_' + a;
+  for (const t of selTris) for (let e = 0; e < 3; e++) {
+    const ga = t.g[e], gb = t.g[(e + 1) % 3], k = ek(ga, gb);
+    cnt.set(k, (cnt.get(k) || 0) + 1);
+    if (!dir.has(k)) dir.set(k, [ga, gb, t.v[e], t.v[(e + 1) % 3]]);
+  }
+  for (const [k, c] of cnt) {
+    if (c !== 1) continue;
+    const [ga, gb, va, vb] = dir.get(k), na = newPos.get(ga), nb = newPos.get(gb);
+    out.push(va.clone(), vb.clone(), nb.clone());
+    out.push(va.clone(), nb.clone(), na.clone());
+  }
+  commitTriangleSoup(m, out);
+  reselectFaces(cap);   // new cap stays selected for an immediate MOVE
+  updateHint();
+}
+// Switch element-selection mode (the right-side icon toolbar).
+function setSelMode(mode) {
+  selMode = mode;
+  document.querySelectorAll('.selmode-btn').forEach(b => b.classList.toggle('active', b.dataset.selmode === mode));
+  // the selection-op toolbar is meaningless in OBJECT mode — hide it (also keeps it
+  // off the asset list, which shares the left edge).
+  document.getElementById('w-selop').style.display = elemMode() ? '' : 'none';
+  selElems = [];   // switching element type drops the (now-incompatible) selection
+  if (mode === 'object') clearVertHandles();
+  else { buildVertHandles(); updateElemHilite(); }
+  updateHint();
+}
+// Switch how a pick combines with the selection (the left-side toolbar).
+function setSelOp(op) {
+  selOp = op;
+  document.querySelectorAll('.selop-btn').forEach(b => b.classList.toggle('active', b.dataset.selop === op));
+  updateHint();
+}
+
+// ── Edit ops ────────────────────────────────────────────────────────────────
+function addMesh(kind) {
+  const mesh = addPart({ kind, params: defaultParams(kind), pos: [0, 1.5, 0], rot: [0, 0, 0], scale: [1, 1, 1],
+    mat: { kind: 'standard', color: '#b0b6bb', roughness: 0.8, metalness: 0.1, flatShading: true, emissive: null, emissiveIntensity: 0, opacity: 1, transparent: false } });
+  selIndex = parts().indexOf(mesh); updateSel();
+}
+// Rebuild the selected parametric part's geometry from its (edited) params.
+function rebuildGeo() {
+  const m = parts()[selIndex]; if (!m || m.userData.kind === 'frozen') return;
+  const old = m.geometry;
+  m.geometry = makeGeo(m.userData.kind, m.userData.params);
+  m.userData.parametric = true;   // now driven by params (exports as kind+params)
+  old.dispose();
+  if (elemMode()) { buildVertHandles(); updateElemHilite(); }   // verts changed — rebuild the handle cloud
+  selBox.box.setFromObject(m); refreshStats();
+}
+// The top box is shared: hide it when none of its rows apply, OR when the TOOLS panel is
+// minimized (no tool in play, and it would overlap the top menus otherwise).
+function syncTopBox() {
+  const toolsOpen = document.getElementById('w-tools').classList.contains('open');
+  const shown = toolsOpen && ['coords', 'geom-params', 'mat-params', 'dmg-hp', 'dmg-params'].some(id => {
+    const el = document.getElementById(id); return el && el.style.display !== 'none';
+  });
+  document.getElementById('top-center').classList.toggle('empty', !shown);
+}
+// Short axis-style label for a geometry param key (full name on hover).
+const GP_SHORT = { w: 'W', h: 'H', d: 'D', r: 'R', detail: 'DET', rt: 'R▲', rb: 'R▼', seg: 'SEG' };
+// Editable geometry params, inline (one compact row). Hidden in MATERIAL mode (you're
+// not editing geometry there) and when nothing's selected.
+function refreshGeomParams() {
+  const wrap = document.getElementById('geom-params');
+  const m = parts()[selIndex];
+  if (toolMode === 'material' || toolMode === 'damage' || !m) { wrap.style.display = 'none'; wrap.innerHTML = ''; syncTopBox(); return; }
+  wrap.style.display = 'flex';
+  if (m.userData.kind === 'frozen') { wrap.innerHTML = '<span class="gmode">GEO</span><span class="ghint">custom mesh — use SCALE</span>'; syncTopBox(); return; }
+  const kind = m.userData.kind, schema = GEO_PARAMS[kind] || [];
+  wrap.innerHTML = `<span class="gmode">${kind.toUpperCase()}</span>` + schema.map(([k, label, def]) => {
+    const v = m.userData.params[k] ?? def;
+    const step = (k === 'seg' || k === 'detail') ? 1 : 0.1;
+    return `<label title="${label}">${GP_SHORT[k] || k.toUpperCase()}</label><input data-gp="${k}" type="number" step="${step}" value="${v}">`;
+  }).join('');
+  syncTopBox();
+  wrap.querySelectorAll('input[data-gp]').forEach(inp => inp.addEventListener('change', () => {
+    const key = inp.dataset.gp; let val = parseFloat(inp.value); if (Number.isNaN(val)) return;
+    if (key === 'seg') val = Math.max(3, Math.round(val));
+    if (key === 'detail') val = Math.max(0, Math.round(val));
+    m.userData.params[key] = val; rebuildGeo();
+  }));
+}
+function deleteSelected() {
+  const m = parts()[selIndex]; if (!m) return;
+  model.remove(m); m.geometry.dispose(); selIndex = -1; updateSel();
+}
+function setColor(hex) {
+  const m = parts()[selIndex]; if (!m) return;
+  m.material.color.set(hex); m.userData.mat.color = hex; m.userData.mat.team = false;   // a fixed colour is no longer team-driven
+}
+// Mark the selected part as TEAM-coloured: its colour now follows the COLOR menu.
+function applyTeamColor() {
+  const m = parts()[selIndex]; if (!m) return;
+  const hex = '#' + new THREE.Color(TEAM_COLORS[accentIndex].hex).getHexString();
+  m.material.color.set(hex); m.userData.mat.color = hex; m.userData.mat.team = true;
+}
+// Re-tint every team-flagged part to a new accent — WITHOUT rebuilding (keeps edits).
+function applyAccent(hex) {
+  const norm = '#' + new THREE.Color(hex).getHexString();
+  for (const m of parts()) {
+    if (m.userData.mat && m.userData.mat.team) { m.material.color.set(norm); m.userData.mat.color = norm; }
+  }
+  if (parts()[selIndex]) selBox.box.setFromObject(parts()[selIndex]);
+}
+// COLOUR map — its own slot now (no longer drags bump/spec along).
+function applyTexture(kind) {
+  const m = parts()[selIndex]; if (!m) return;
+  const mat = m.material, u = m.userData.mat;
+  if (kind === 'none') { mat.map = null; u.map = null; }
+  else {
+    const { tex, url } = buildTex(kind, u.tile || [1, 1]);
+    mat.map = tex; mat.color.set('#ffffff');     // white base so the texture reads true
+    u.color = '#ffffff'; u.map = url; u.tile = u.tile || [1, 1];
+  }
+  mat.needsUpdate = true; refreshMatParams(); syncMapButtons();
+}
+// BUMP map — an INDEPENDENT texture giving surface relief; works with no colour map.
+function applyBumpTex(kind) {
+  const m = parts()[selIndex]; if (!m) return;
+  const mat = m.material, u = m.userData.mat;
+  if (!mat.isMeshStandardMaterial) return;   // bump needs a lit material
+  if (kind === 'none') { mat.bumpMap = null; u.bumpTex = null; }
+  else {
+    const { tex, url } = buildTex(kind, u.tile || [1, 1]);
+    mat.bumpMap = tex; mat.bumpScale = u.bumpScale ?? 0.4; u.bumpTex = url; u.bumpScale = mat.bumpScale; u.tile = u.tile || [1, 1];
+  }
+  mat.needsUpdate = true;
+}
+// SPEC (roughness) map — an INDEPENDENT texture varying shininess; works with no colour map.
+function applySpecTex(kind) {
+  const m = parts()[selIndex]; if (!m) return;
+  const mat = m.material, u = m.userData.mat;
+  if (!mat.isMeshStandardMaterial) return;
+  if (kind === 'none') { mat.roughnessMap = null; u.specTex = null; }
+  else {
+    const { tex, url } = buildTex(kind, u.tile || [1, 1]);
+    mat.roughnessMap = tex; u.specTex = url; u.tile = u.tile || [1, 1];
+  }
+  mat.needsUpdate = true;
+}
+function setBumpScale(v) {
+  const m = parts()[selIndex]; if (!m) return;
+  m.material.bumpScale = v; m.userData.mat.bumpScale = v; m.material.needsUpdate = true;
+}
+// One tiling drives every map slot the part has (colour / bump / spec).
+function setTile(axis, v) {
+  const m = parts()[selIndex]; if (!m) return;
+  const mat = m.material, maps = [mat.map, mat.bumpMap, mat.roughnessMap].filter(Boolean);
+  if (!maps.length) return;
+  for (const map of maps) { map.wrapS = map.wrapT = THREE.RepeatWrapping; if (axis === 'x') map.repeat.x = v; else map.repeat.y = v; map.needsUpdate = true; }
+  m.userData.mat.tile = [maps[0].repeat.x, maps[0].repeat.y];
+}
+// Top-stack panel under MATERIAL: the active sub-tool's map controls — TILING for the
+// slot it edits (colour / bump / spec), plus the BUMP LEVEL when the BUMP menu is open.
+function refreshMatParams() {
+  const wrap = document.getElementById('mat-params'); if (!wrap) return;
+  const m = parts()[selIndex], mat = m ? m.material : null;
+  // which map does the open sub-tool care about?
+  const slot = !mat ? null : matSub === 'bump' ? mat.bumpMap : matSub === 'specular' ? mat.roughnessMap : matSub === 'textures' ? mat.map : null;
+  if (toolMode !== 'material' || !slot) { wrap.style.display = 'none'; wrap.innerHTML = ''; syncTopBox(); return; }
+  wrap.style.display = 'flex';
+  const u = m.userData.mat, tile = u.tile || [slot.repeat.x, slot.repeat.y];
+  let html =
+    `<span class="gmode">TILE</span>` +
+    `<label>X</label><input id="mp-tx" type="number" step="0.5" min="0.1" value="${+tile[0].toFixed(2)}">` +
+    `<label>Y</label><input id="mp-ty" type="number" step="0.5" min="0.1" value="${+tile[1].toFixed(2)}">`;
+  if (matSub === 'bump') html += `<label style="margin-left:10px">LEVEL</label><input id="mp-bs" type="number" step="0.1" min="0" value="${(u.bumpScale ?? 0.4)}">`;
+  wrap.innerHTML = html;
+  syncTopBox();
+  document.getElementById('mp-tx').addEventListener('change', e => { const v = parseFloat(e.target.value); if (v > 0) setTile('x', v); });
+  document.getElementById('mp-ty').addEventListener('change', e => { const v = parseFloat(e.target.value); if (v > 0) setTile('y', v); });
+  const bs = document.getElementById('mp-bs'); if (bs) bs.addEventListener('change', e => { const v = parseFloat(e.target.value); if (!Number.isNaN(v)) setBumpScale(v); });
+}
+
+// ── Destruction staging (DAMAGE tool) ─────────────────────────────────────────
+// Each part has fallAt (HP fraction it lets go at) + dmgStyle (tumble / squish). The
+// preview scrubs HP and animates parts through their stages — DETERMINISTIC (a pure
+// function of HP), so dragging the slider scrubs cleanly both ways. The real geometry
+// transform is snapshotted (_dmg0) so editing/export ignore the preview pose.
+const lerp = (a, b, t) => a + (b - a) * t;
+const DMG_BAND = 0.18;   // HP span over which a triggered part fully gives way
+const dmgActive = () => toolMode === 'damage';
+function dmgSnapshot() {
+  for (const m of parts()) {
+    const u = m.userData;
+    u._dmg0 = { pos: m.position.toArray(), rot: [m.rotation.x, m.rotation.y, m.rotation.z], scale: m.scale.toArray() };
+    const a = Math.random() * Math.PI * 2;   // a stable per-part tumble direction for the preview
+    u._dmgRest = { dx: Math.cos(a) * CELL * 0.45, dz: Math.sin(a) * CELL * 0.45, rx: (Math.random() - 0.5) * 2.6, ry: (Math.random() - 0.5) * 2.6, rz: (Math.random() - 0.5) * 2.6 };
+  }
+}
+function dmgRestore() {
+  for (const m of parts()) {
+    const s0 = m.userData._dmg0;
+    if (s0) { m.position.fromArray(s0.pos); m.rotation.set(s0.rot[0], s0.rot[1], s0.rot[2]); m.scale.fromArray(s0.scale); }
+    delete m.userData._dmg0; delete m.userData._dmgRest;
+  }
+  if (parts()[selIndex]) selBox.box.setFromObject(parts()[selIndex]);
+}
+function applyDamagePreview() {
+  const hp = dmgPreviewHP;
+  for (const m of parts()) {
+    const u = m.userData, s0 = u._dmg0; if (!s0) continue;
+    const fa = u.fallAt ?? 0;
+    let t = hp <= fa ? Math.min(1, (fa - hp) / DMG_BAND) : 0;   // 0 intact .. 1 fully gone
+    t = t * t * (3 - 2 * t);   // smoothstep
+    if (t <= 0) { m.position.fromArray(s0.pos); m.rotation.set(s0.rot[0], s0.rot[1], s0.rot[2]); m.scale.fromArray(s0.scale); continue; }
+    if (u.dmgStyle === 'squish') {
+      m.scale.set(s0.scale[0] * (1 + 0.3 * t), s0.scale[1] * (1 - 0.9 * t), s0.scale[2] * (1 + 0.3 * t));
+      m.position.set(s0.pos[0], lerp(s0.pos[1], s0.pos[1] * 0.08, t), s0.pos[2]);
+      m.rotation.set(s0.rot[0], s0.rot[1], s0.rot[2]);
+    } else {   // tumble: slide outward + drop to rubble + spin
+      const r = u._dmgRest;
+      m.position.set(lerp(s0.pos[0], s0.pos[0] + r.dx, t), lerp(s0.pos[1], 0.25, t), lerp(s0.pos[2], s0.pos[2] + r.dz, t));
+      m.scale.fromArray(s0.scale);
+      m.rotation.set(s0.rot[0] + r.rx * t, s0.rot[1] + r.ry * t, s0.rot[2] + r.rz * t);
+    }
+  }
+  if (parts()[selIndex] && selBox.visible) selBox.box.setFromObject(parts()[selIndex]);
+}
+function setFallAt(frac) {
+  const m = parts()[selIndex]; if (!m) return;
+  m.userData.fallAt = Math.max(0, Math.min(1, frac));
+  if (dmgActive()) applyDamagePreview();
+}
+function setDmgStyle(style) {
+  const m = parts()[selIndex]; if (!m) return;
+  m.userData.dmgStyle = style;
+  document.querySelectorAll('#tools-stack [data-dmgstyle]').forEach(b => b.classList.toggle('active', b.dataset.dmgstyle === style));
+  if (dmgActive()) applyDamagePreview();
+}
+// Top-box rows for DAMAGE: a global HP scrub slider + the selected part's FALL@ %.
+function refreshDmgParams() {
+  const hpRow = document.getElementById('dmg-hp'), fallRow = document.getElementById('dmg-params');
+  if (!dmgActive()) { hpRow.style.display = 'none'; fallRow.style.display = 'none'; syncTopBox(); return; }
+  hpRow.style.display = 'flex';
+  hpRow.innerHTML = `<span class="gmode">HP</span><input id="dmg-slider" type="range" min="0" max="100" value="${Math.round(dmgPreviewHP * 100)}"><span id="dmg-hpval">${Math.round(dmgPreviewHP * 100)}%</span>`;
+  document.getElementById('dmg-slider').addEventListener('input', e => {
+    dmgPreviewHP = (parseInt(e.target.value, 10) || 0) / 100;
+    document.getElementById('dmg-hpval').textContent = Math.round(dmgPreviewHP * 100) + '%';
+    applyDamagePreview();
+  });
+  const m = parts()[selIndex];
+  if (!m) { fallRow.style.display = 'none'; syncTopBox(); return; }
+  fallRow.style.display = 'flex';
+  fallRow.innerHTML = `<span class="gmode">FALL@</span><input id="dmg-fall" type="number" min="0" max="100" step="5" value="${Math.round((m.userData.fallAt ?? 0) * 100)}"><label>% HP</label>`;
+  document.getElementById('dmg-fall').addEventListener('change', e => { const v = parseFloat(e.target.value); if (!Number.isNaN(v)) setFallAt(v / 100); });
+  // reflect the part's style on the flyout buttons
+  document.querySelectorAll('#tools-stack [data-dmgstyle]').forEach(b => b.classList.toggle('active', b.dataset.dmgstyle === (m.userData.dmgStyle || 'tumble')));
+  syncTopBox();
+}
+
+// ── Export / import / save ───────────────────────────────────────────────────
+function exportConfig() {
+  return {
+    id: meta.id, name: meta.name, category: meta.category, accent: meta.accent,
+    destructible: meta.type === '—' ? null : { type: meta.type, hp: meta.hp },
+    footprint: { w: meta.fw, d: meta.fd },
+    parts: parts().map(m => {
+      const u = m.userData;
+      const editable = u.kind !== 'frozen';          // maps to a primitive (params known)
+      // while the DAMAGE preview is scrubbed, the live transform is animated — the TRUE
+      // (intact) transform is snapshotted in _dmg0, so export/save use that.
+      const s0 = u._dmg0;
+      const part = {
+        kind: editable ? u.kind : 'frozen',
+        pos: s0 ? s0.pos : m.position.toArray(),
+        rot: s0 ? s0.rot : [m.rotation.x, m.rotation.y, m.rotation.z],
+        scale: s0 ? s0.scale : m.scale.toArray(),
+        mat: u.mat, fallAt: u.fallAt ?? 0, dmgStyle: u.dmgStyle || 'tumble',
+      };
+      if (editable && u.parametric) {
+        part.params = u.params || {};                // param-edited → rebuild from params on load
+      } else {
+        part.geo = m.geometry.toJSON();              // ship the exact geometry…
+        if (editable) part.params = u.params || {};  // …but KEEP the primitive's params so it stays editable (was the freeze-on-reload bug)
+      }
+      return part;
+    }),
+  };
+}
+function importConfig(cfg, { silent = false } = {}) {
+  clearModel();
+  if (cfg.destructible) { meta.type = cfg.destructible.type; meta.hp = cfg.destructible.hp; }
+  if (cfg.footprint) { meta.fw = cfg.footprint.w; meta.fd = cfg.footprint.d; }
+  for (const p of cfg.parts) addPart({ kind: p.kind, params: p.params, geometry: p.geo, pos: p.pos, rot: p.rot, scale: p.scale, mat: p.mat, fallAt: p.fallAt, dmgStyle: p.dmgStyle });
+  if (!silent) { frameModel(); refreshStats(); }
+}
+
+// ── Stats / live measurement ─────────────────────────────────────────────────
+function refreshStats() {
+  document.getElementById('stats-name').textContent = meta.name.toUpperCase();
+  // NAME is editable only for user-created assets (manifest names are code).
+  const isUser = !!(currentAsset() && currentAsset().user);
+  document.getElementById('s-name-row').style.display = isUser ? 'flex' : 'none';
+  const nameEl = document.getElementById('s-name');
+  if (nameEl && document.activeElement !== nameEl) nameEl.value = meta.name;
+  document.getElementById('s-cat').textContent = meta.category;
+  document.getElementById('s-hp').value = meta.hp;
+  document.getElementById('s-hptype').textContent = meta.type === '—' ? '(indestructible)' : '(' + meta.type + ')';
+  document.getElementById('s-fw').value = meta.fw;
+  document.getElementById('s-fd').value = meta.fd;
+  const box = new THREE.Box3().setFromObject(model);
+  if (!box.isEmpty()) {
+    const s = new THREE.Vector3(); box.getSize(s);
+    document.getElementById('s-size').textContent = `${s.x.toFixed(1)}·${s.y.toFixed(1)}·${s.z.toFixed(1)}`;
+    document.getElementById('s-meas').textContent = `${Math.max(1, Math.ceil((s.x - 1e-4) / CELL))} × ${Math.max(1, Math.ceil((s.z - 1e-4) / CELL))} cells`;
+  } else { document.getElementById('s-size').textContent = '—'; document.getElementById('s-meas').textContent = '—'; }
+  document.getElementById('s-parts').textContent = parts().length;
+  refreshCoords();
+}
+
+// Live X/Y/Z position of the selected part (editable). Don't clobber a box the
+// user is currently typing in.
+// Which transform the X/Y/Z boxes reflect: scale/rotation follow the active
+// tool, otherwise position (move / nothing selected).
+function coordTarget() { return toolMode === 'scale' ? 'scale' : toolMode === 'rotate' ? 'rotation' : 'position'; }
+const vertexCoordActive = () => singleVertGroup() >= 0 && parts()[selIndex];
+function refreshCoords() {
+  const coordsEl = document.getElementById('coords');
+  // MATERIAL / DAMAGE modes don't edit position/scale/rotation → drop the X/Y/Z bar.
+  if (toolMode === 'material' || toolMode === 'damage') { coordsEl.style.display = 'none'; syncTopBox(); return; }
+  coordsEl.style.display = 'flex';
+  // VERTEX mode: the boxes show/set the selected vertex's local position.
+  if (vertexCoordActive()) {
+    document.getElementById('coord-mode').textContent = 'VERT';
+    const pos = parts()[selIndex].geometry.attributes.position, i0 = vertGroups[singleVertGroup()][0];
+    for (const [id, c] of [['cx', 0], ['cy', 1], ['cz', 2]]) {
+      const el = document.getElementById(id); el.disabled = false;
+      if (document.activeElement === el) continue;
+      el.value = +pos.getComponent(i0, c).toFixed(2);
+    }
+    syncTopBox(); return;
+  }
+  const m = parts()[selIndex];
+  const tgt = coordTarget();
+  document.getElementById('coord-mode').textContent = tgt === 'scale' ? 'SCALE' : tgt === 'rotation' ? 'ROT°' : 'POS';
+  for (const [ax, id] of [['x', 'cx'], ['y', 'cy'], ['z', 'cz']]) {
+    const el = document.getElementById(id);
+    el.disabled = !m;
+    if (document.activeElement === el) continue;
+    if (!m) { el.value = ''; continue; }
+    let v = m[tgt][ax];
+    if (tgt === 'rotation') v *= 180 / Math.PI;   // show rotation in degrees
+    el.value = +v.toFixed(2);
+  }
+  syncTopBox();
+}
+[['x', 'cx', 0], ['y', 'cy', 1], ['z', 'cz', 2]].forEach(([ax, id, comp]) => {
+  document.getElementById(id).addEventListener('change', e => {
+    const v = parseFloat(e.target.value); if (Number.isNaN(v)) return;
+    if (vertexCoordActive()) { setVertexComponent(comp, snapVal(v)); return; }
+    const m = parts()[selIndex]; if (!m) return;
+    const tgt = coordTarget();
+    if (tgt === 'rotation') m.rotation[ax] = snapVal(v) * Math.PI / 180;
+    else if (tgt === 'scale') m.scale[ax] = Math.max(0.05, snapVal(v));
+    else m.position[ax] = snapVal(v);
+    selBox.box.setFromObject(m); refreshStats();
+  });
+});
+
+// ── UI: collapsible widgets ──────────────────────────────────────────────────
+document.querySelectorAll('.wbtn[data-toggle]').forEach(btn =>
+  btn.addEventListener('click', () => { document.getElementById(btn.dataset.toggle).classList.toggle('open'); syncTopBox(); }));
+
+// asset list = the shared MANIFEST assets + the user's own NEW assets (kept in
+// localStorage). User assets have no code maker — they live entirely as a saved
+// config + a small index entry, so they reappear on reload like any other.
+const listEl = document.getElementById('assets-list');
+const USER_KEY = 'assetdesigner:userlist';
+function loadUserIndex() {
+  try { const a = JSON.parse(localStorage.getItem(USER_KEY)); return Array.isArray(a) ? a.map(x => ({ ...x, user: true })) : []; }
+  catch (e) { return []; }
+}
+function saveUserIndex() { try { localStorage.setItem(USER_KEY, JSON.stringify(userAssets)); } catch (e) { /* private/full */ } }
+let userAssets = loadUserIndex();
+const allAssets = () => ASSETS.concat(userAssets);
+const currentAsset = () => allAssets()[activeIndex];
+
+function rebuildAssetList() {
+  const rows = allAssets().map((a, i) =>
+    `<button data-index="${i}"${a.user ? ' class="user"' : ''}>${a.name.toUpperCase()}` +
+    `${a.user ? `<span class="del-asset" data-del="${i}" title="delete asset">✕</span>` : ''}</button>`).join('');
+  listEl.innerHTML = rows + `<button id="new-asset-btn">+ NEW ASSET</button>`;
+  listEl.querySelectorAll('button[data-index]').forEach(b => b.addEventListener('click', e => {
+    if (e.target.classList.contains('del-asset')) return;
+    loadAsset(parseInt(b.dataset.index, 10));
+  }));
+  listEl.querySelectorAll('.del-asset').forEach(s => s.addEventListener('click', e => { e.stopPropagation(); deleteUserAsset(parseInt(s.dataset.del, 10)); }));
+  const nb = document.getElementById('new-asset-btn'); if (nb) nb.addEventListener('click', () => newAsset());
+  refreshAssetTabs();
+}
+function refreshAssetTabs() { listEl.querySelectorAll('button[data-index]').forEach(b => b.classList.toggle('active', parseInt(b.dataset.index, 10) === activeIndex)); }
+
+// Create a fresh blank asset (a single starter box) and open it.
+function newAsset(presetName) {
+  const def = `Custom ${userAssets.length + 1}`;
+  const name = presetName != null ? String(presetName).trim() : ((window.prompt('New asset name:', def) || '').trim());
+  if (!name) return null;
+  const a = { id: 'user-' + Date.now().toString(36) + Math.floor(Math.random() * 1e3), name,
+    category: 'custom', accent: true, destructible: { type: 'building', hp: 100 }, footprint: { w: 1, d: 1 }, user: true };
+  userAssets.push(a); saveUserIndex(); rebuildAssetList();
+  loadAsset(allAssets().length - 1, { fresh: true });   // → starter box
+  saveLocal();   // persist the starter so it survives a reload
+  msg('created "' + name + '"');
+  return a.id;
+}
+function deleteUserAsset(i) {
+  const a = allAssets()[i]; if (!a || !a.user) return;
+  if (typeof window.confirm === 'function' && !window.confirm(`Delete asset "${a.name}"? This can't be undone.`)) return;
+  flushSave();
+  try { localStorage.removeItem(LS_KEY(a.id)); } catch (e) { /* ignore */ }
+  const ui = userAssets.indexOf(a); if (ui >= 0) userAssets.splice(ui, 1);
+  saveUserIndex(); rebuildAssetList();
+  loadAsset(0);   // fall back to the first manifest asset
+  msg('deleted "' + a.name + '"');
+}
+rebuildAssetList();
+
+// colors (all team colours)
+const colorsEl = document.getElementById('colors-list');
+colorsEl.innerHTML = TEAM_COLORS.map((c, i) => `<button class="accent-sw${i === 0 ? ' active' : ''}" data-index="${i}" style="background:${c.hex}" title="${c.name}"></button>`).join('');
+colorsEl.querySelectorAll('.accent-sw').forEach(b => b.addEventListener('click', () => {
+  accentIndex = parseInt(b.dataset.index, 10);
+  colorsEl.querySelectorAll('.accent-sw').forEach(x => x.classList.remove('active')); b.classList.add('active');
+  applyAccent(TEAM_COLORS[accentIndex].hex);   // re-tint team-coloured parts only; keeps edits
+  updateTeamSwatch();
+}));
+
+// MATERIAL nested flyout: MATERIAL → [COLORS, TEXTURES, SPECULAR, BUMP] sub-tools,
+// each of which flies its own samples/options further left. Leaf buttons keep their
+// data-* hooks so one set of listeners (queried under #material-kids) wires them all.
+const MAT_PALETTE = ['#e8e8e8', '#9a948a', '#6f6a61', '#3b3f44', ...TEAM_COLORS.slice(0, 4).map(c => c.hex)];
+const texSwatches = Object.keys(TEX).map(k => {
+  let url = ''; try { url = TEX[k]().image.toDataURL(); } catch (e) { /* ignore */ }
+  return `<button class="sw tex" data-tex="${k}" title="${k}" style="background-image:url(${url})"></button>`;
+}).join('');
+const noneSwatch = `<button class="sw none-sw" data-tex="none" title="no texture">∅</button>`;
+const teamSwatch = `<button class="sw team-sw" data-team="1" title="team colour (follows the COLOR menu)">T</button>`;
+const colorSwatches = MAT_PALETTE.map(h => `<button class="sw" style="background:${h}" data-color="${h}"></button>`).join('');
+// BUMP + SPEC are independent texture pickers now (∅ + the same texture swatches).
+const texSwatchesFor = (attr) => `<button class="sw none-sw" ${attr}="none" title="no map">∅</button>` + Object.keys(TEX).map(k => {
+  let url = ''; try { url = TEX[k]().image.toDataURL(); } catch (e) { /* ignore */ }
+  return `<button class="sw tex" ${attr}="${k}" title="${k}" style="background-image:url(${url})"></button>`;
+}).join('');
+document.getElementById('sub-textures').innerHTML = texSwatches + noneSwatch;
+document.getElementById('sub-colors').innerHTML = teamSwatch + colorSwatches;
+document.getElementById('sub-bump').innerHTML = texSwatchesFor('data-bumptex');
+document.getElementById('sub-specular').innerHTML = texSwatchesFor('data-spectex');
+
+document.querySelectorAll('#material-kids [data-tex]').forEach(b => b.addEventListener('click', () => applyTexture(b.dataset.tex)));
+document.querySelectorAll('#material-kids [data-team]').forEach(b => b.addEventListener('click', applyTeamColor));
+document.querySelectorAll('#material-kids [data-color]').forEach(b => b.addEventListener('click', () => setColor(b.dataset.color)));
+document.querySelectorAll('#material-kids [data-bumptex]').forEach(b => b.addEventListener('click', () => { applyBumpTex(b.dataset.bumptex); syncMapButtons(); refreshMatParams(); }));
+document.querySelectorAll('#material-kids [data-spectex]').forEach(b => b.addEventListener('click', () => { applySpecTex(b.dataset.spectex); syncMapButtons(); refreshMatParams(); }));
+function updateTeamSwatch() { const el = document.querySelector('#material-kids .team-sw'); if (el) el.style.background = TEAM_COLORS[accentIndex].hex; }
+updateTeamSwatch();
+
+// Reflect the selected part's bump/spec state — highlight ∅ when that slot is empty.
+function syncMapButtons() {
+  const m = parts()[selIndex], mat = m ? m.material : null;
+  document.querySelectorAll('#sub-bump [data-bumptex="none"]').forEach(b => b.classList.toggle('active', !mat || !mat.bumpMap));
+  document.querySelectorAll('#sub-specular [data-spectex="none"]').forEach(b => b.classList.toggle('active', !mat || !mat.roughnessMap));
+}
+
+// Sub-tool buttons: open one set of samples at a time, flying further left.
+document.querySelectorAll('.subtool > .subtool-btn').forEach(btn => {
+  const sub = btn.parentElement;
+  btn.addEventListener('click', () => {
+    const opening = !sub.classList.contains('active');
+    document.querySelectorAll('.subtool').forEach(x => x.classList.remove('active'));
+    matSub = opening ? sub.dataset.sub : null;
+    if (opening) { sub.classList.add('active'); if (matSub === 'specular' || matSub === 'bump') syncMapButtons(); }
+    refreshMatParams();   // TILING pops in only under TEXTURES
+  });
+});
+
+// SNAP: a compact button that pops a value list (like the COLOR button) — keeps the
+// coords row narrow so it doesn't wrap on a phone.
+const snapBtn = document.getElementById('snap-btn');
+const snapPop = document.getElementById('snap-pop');
+// The button keeps a fixed "⊞ SNAP" label (like COLOR); the current value shows as the
+// highlighted option when the picker is open.
+function updateSnapBtn() {
+  snapPop.querySelectorAll('button').forEach(b => b.classList.toggle('active', parseFloat(b.dataset.snap) === snap));
+}
+snapBtn.addEventListener('click', e => { e.stopPropagation(); updateSnapBtn(); snapPop.classList.toggle('open'); });
+snapPop.querySelectorAll('button[data-snap]').forEach(b => b.addEventListener('click', () => {
+  snap = parseFloat(b.dataset.snap) || 0; updateSnapBtn(); snapPop.classList.remove('open');
+}));
+document.addEventListener('click', () => snapPop.classList.remove('open'));   // close on any outside click
+updateSnapBtn();
+
+// stats inputs
+document.getElementById('s-name').addEventListener('change', e => {
+  const a = currentAsset(); if (!a || !a.user) return;
+  const nm = e.target.value.trim(); if (!nm) { e.target.value = meta.name; return; }
+  meta.name = nm; a.name = nm; saveUserIndex(); rebuildAssetList(); refreshStats();
+});
+document.getElementById('s-hp').addEventListener('change', e => { meta.hp = parseInt(e.target.value, 10) || 0; });
+document.getElementById('s-fw').addEventListener('change', e => { meta.fw = Math.max(1, parseInt(e.target.value, 10) || 1); });
+document.getElementById('s-fd').addEventListener('change', e => { meta.fd = Math.max(1, parseInt(e.target.value, 10) || 1); });
+
+// export / import / save / reset / AUTOSAVE
+const msg = (t) => { document.getElementById('export-msg').textContent = t; };
+const LS_KEY = (id) => 'assetdesigner:' + id;
+let saveTimer = null;
+
+// Persist the working asset to localStorage (quota-guarded). exportConfig captures
+// every part + geometry/material, so reopening this asset restores the edits.
+function saveLocal() {
+  try {
+    localStorage.setItem(LS_KEY(meta.id), JSON.stringify(exportConfig()));
+    msg('saved locally ✓'); flashSaved('saved ✓');
+  } catch (e) {
+    msg('⚠ save failed: ' + (e && e.name === 'QuotaExceededError' ? 'storage full — EXPORT to back up' : (e && e.message)));
+    flashSaved('save failed');
+  }
+}
+function scheduleSave() { clearTimeout(saveTimer); saveTimer = setTimeout(saveLocal, 500); }   // debounced: a drag = one write
+function flushSave() { if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; saveLocal(); } }   // save NOW (e.g. before switching asset)
+function flashSaved(t) {
+  const el = document.getElementById('save-dot'); if (!el) return;
+  el.textContent = t; el.classList.add('show');
+  clearTimeout(el._t); el._t = setTimeout(() => el.classList.remove('show'), 1500);
+}
+// Discard this asset's local save and rebuild it from the code default.
+function resetAsset() {
+  clearTimeout(saveTimer); saveTimer = null;       // drop any pending autosave first
+  localStorage.removeItem(LS_KEY(meta.id));
+  loadAsset(activeIndex, { fresh: true });
+  msg('reset to code default'); flashSaved('reset');
+}
+
+document.getElementById('btn-export').addEventListener('click', () => { document.getElementById('export-text').value = JSON.stringify(exportConfig(), null, 1); msg('exported ' + parts().length + ' parts'); });
+document.getElementById('btn-import').addEventListener('click', () => {
+  try { const cfg = JSON.parse(document.getElementById('export-text').value); importConfig(cfg); saveLocal(); msg('imported ' + parts().length + ' parts'); }
+  catch (e) { msg('✗ invalid JSON: ' + e.message); }
+});
+document.getElementById('btn-save').addEventListener('click', saveLocal);
+const _resetBtn = document.getElementById('btn-reset'); if (_resetBtn) _resetBtn.addEventListener('click', resetAsset);
+
+// AUTOSAVE: persist shortly after any edit gesture (a drag, a tap on a tool/swatch, a
+// typed value), debounced so a drag is a single write. Loading an asset isn't a user
+// gesture, so a freshly-opened code default isn't written until you actually touch it.
+['pointerup', 'change'].forEach(ev => document.addEventListener(ev, scheduleSave, true));
+
+// tools (flyout to the left; tapping the active parent collapses it)
+document.querySelectorAll('.tool > .tool-btn').forEach(btn => {
+  const tool = btn.parentElement;
+  btn.addEventListener('click', () => {
+    const t = tool.dataset.tool;
+    if (t === 'delete') { deleteSelected(); return; }
+    if (t === 'extrude') { extrudeSelection(); return; }   // immediate action, no flyout
+    const opening = !tool.classList.contains('active');
+    document.querySelectorAll('.tool').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.tool-kids button[data-axis]').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.subtool').forEach(x => x.classList.remove('active'));   // collapse MATERIAL's nested menus
+    matSub = null;   // leaving/entering a tool collapses MATERIAL's sub-menus
+    if (dmgActive()) dmgRestore();   // leaving DAMAGE: put the asset back together
+    if (opening) { tool.classList.add('active'); toolMode = t; toolAxis = null; }
+    else { toolMode = null; toolAxis = null; }
+    if (toolMode === 'damage') { dmgSnapshot(); dmgPreviewHP = 1; }   // enter DAMAGE: snapshot, start intact
+    updateHint();
+  });
+});
+document.querySelectorAll('.tool-kids button[data-geo]').forEach(b => b.addEventListener('click', () => addMesh(b.dataset.geo)));
+document.querySelectorAll('.tool-kids button[data-dmgstyle]').forEach(b => b.addEventListener('click', () => setDmgStyle(b.dataset.dmgstyle)));
+document.querySelectorAll('.tool-kids button[data-cuts]').forEach(b => b.addEventListener('click', () => subdivideMesh(parseInt(b.dataset.cuts, 10))));
+document.querySelectorAll('.tool-kids button[data-axis]').forEach(b => b.addEventListener('click', () => {
+  b.parentElement.querySelectorAll('button').forEach(x => x.classList.remove('active')); b.classList.add('active');
+  toolAxis = b.dataset.axis; updateHint();
+}));
+// element-selection mode toolbar (Blender-style: OBJECT / VERTEX / EDGE / FACE)
+document.querySelectorAll('.selmode-btn').forEach(b => b.addEventListener('click', () => setSelMode(b.dataset.selmode)));
+// selection-op toolbar (left): NORMAL / ADD / SUBTRACT modes + a SELECT-ALL action
+document.querySelectorAll('.selop-btn').forEach(b => b.addEventListener('click', () => setSelOp(b.dataset.selop)));
+document.querySelectorAll('.selact-btn').forEach(b => b.addEventListener('click', () => { if (b.dataset.selact === 'all') selectAllElements(); }));
+function updateHint() {
+  let txt;
+  if (elemMode()) {
+    const lbl = selMode.toUpperCase(), op = selOp === 'normal' ? '' : ` [${selOp.toUpperCase()}]`;
+    const n = selElems.length;
+    const lblN = n > 1 ? (selMode === 'vertex' ? 'VERTICES' : lbl + 'S') : lbl;
+    txt = !hasSel() ? `TAP A ${lbl}${op} to select  •  OBJECT mode edits the whole part`
+      : toolAxis ? `DRAG = ${(toolMode || 'MOVE').toUpperCase()} ${n} ${lblN} ${toolAxis.toUpperCase()}  •  tap${op} to pick more`
+      : `${n} ${lblN} SELECTED${op}  •  pick MOVE/SCALE/ROTATE + an axis to edit`;
+  }
+  else if (transformActive()) txt = `DRAG = ${toolMode.toUpperCase()} ${toolAxis.toUpperCase()}  •  tap ${toolMode.toUpperCase()} to exit`;
+  else txt = 'TAP MESH = SELECT • DRAG = ORBIT • PINCH = ZOOM';
+  document.getElementById('hint').textContent = txt;
+  // the shared top box reshapes to the active tool: coords (pos/scale/rot/vert) +
+  // geom params when editing geometry; tiling only under MATERIAL ▸ TEXTURES.
+  refreshCoords();
+  refreshGeomParams();
+  refreshMatParams();
+  refreshDmgParams();
+}
+
+// ── Pointer: tap=select, 1-finger drag=orbit/transform, 2-finger=pinch ───────
+const canvas = renderer.domElement;
+const pts = new Map();   // pointerId -> {x,y}
+let dragId = null, lastX = 0, lastY = 0, downX = 0, downY = 0, moved = false, pinchD = 0;
+const dist2 = () => { const a = [...pts.values()]; return Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y); };
+
+canvas.addEventListener('pointerdown', e => {
+  pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pts.size === 1) { dragId = e.pointerId; lastX = downX = e.clientX; lastY = downY = e.clientY; moved = false; }
+  else if (pts.size === 2) { pinchD = dist2(); dragId = null; }
+});
+canvas.addEventListener('pointermove', e => {
+  if (!pts.has(e.pointerId)) return;
+  pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pts.size >= 2) {
+    const d = dist2();
+    if (pinchD) { camRadius = Math.max(4, Math.min(140, camRadius * (pinchD / d))); updateCamera(); }
+    pinchD = d; return;
+  }
+  if (e.pointerId !== dragId) return;
+  const dx = e.clientX - lastX, dy = e.clientY - lastY; lastX = e.clientX; lastY = e.clientY;
+  if (Math.hypot(e.clientX - downX, e.clientY - downY) > SLOP) moved = true;
+  if (elemDragActive()) applyElementTransform(dx);
+  else if (transformActive()) applyTransform(dx);
+  else { camTheta -= dx * 0.008; camPhi = Math.max(0.1, Math.min(1.5, camPhi - dy * 0.008)); updateCamera(); }
+});
+function endPointer(e) {
+  const wasDrag = e.pointerId === dragId;
+  pts.delete(e.pointerId);
+  if (wasDrag) {
+    if (!moved) {
+      if (elemMode()) {
+        const groups = pickElement(downX, downY);
+        if (groups) applyPick(groups);
+        else { raycastSelect(downX, downY); buildVertHandles(); selElems = []; updateElemHilite(); }
+      }
+      else if (!transformActive()) raycastSelect(downX, downY);
+    }
+    dragId = null;
+  }
+  if (pts.size === 1) { const [id, p] = [...pts.entries()][0]; dragId = id; lastX = downX = p.x; lastY = downY = p.y; moved = true; }
+  if (pts.size >= 2) pinchD = dist2();
+}
+canvas.addEventListener('pointerup', endPointer);
+canvas.addEventListener('pointercancel', endPointer);
+canvas.addEventListener('wheel', e => { e.preventDefault(); camRadius = Math.max(4, Math.min(140, camRadius + e.deltaY * 0.02)); updateCamera(); }, { passive: false });
+
+window.addEventListener('resize', () => {
+  const w = container.clientWidth, h = container.clientHeight;
+  camera.aspect = w / h; camera.updateProjectionMatrix(); renderer.setSize(w, h);
+});
+
+// ── Thumbnail mode (used by ~/pw/make-thumbs.js) ─────────────────────────────
+function thumbMode(on) {
+  thumb = on;
+  scene.background = on ? null : new THREE.Color(0x0a1812);
+  document.documentElement.style.background = on ? 'transparent' : '';
+  document.body.style.background = on ? 'transparent' : '';
+  gridHelper.visible = !on; selBox.visible = on ? false : (selIndex >= 0);
+  ['w-assets', 'w-export', 'w-colors', 'w-stats', 'w-tools', 'w-selmode', 'w-selop', 'hint', 'top-center'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.style.display = on ? 'none' : '';
+  });
+  container.style.top = on ? '0' : '';
+  const w = container.clientWidth, h = container.clientHeight;
+  camera.aspect = w / h; camera.updateProjectionMatrix(); renderer.setSize(w, h);
+  frameModel();
+}
+
+// ── Debug / headless hooks ───────────────────────────────────────────────────
+window.AD = {
+  assets: ASSETS,
+  select: (i) => loadAsset(i, { fresh: true }),   // fresh = ignore localStorage (thumbnails want code default)
+  thumbMode,
+  selectPart: (i) => { selIndex = i; updateSel(); },
+  partCount: () => parts().length,
+  addMesh, deleteSelected, setColor, applyTexture, applyTeamColor,
+  setAccent: (i) => { accentIndex = i; applyAccent(TEAM_COLORS[i].hex); },
+  partHasMap: (i) => !!(parts()[i] && parts()[i].material.map),
+  partTeam: (i) => !!(parts()[i] && parts()[i].userData.mat && parts()[i].userData.mat.team),
+  // texture-map hooks (headless): tiling, bump, spec + a readback
+  matTile: (x, y) => { setTile('x', x); setTile('y', y); },
+  matBump: (kind, scale) => { applyBumpTex(kind); if (scale != null) setBumpScale(scale); },
+  matSpec: (kind) => applySpecTex(kind),
+  // damage-staging hooks (headless)
+  damageMode: (on) => { if (dmgActive()) dmgRestore(); toolMode = on ? 'damage' : null; if (on) { dmgSnapshot(); dmgPreviewHP = 1; } },
+  setFall: (i, frac) => { selIndex = i; setFallAt(frac); },
+  setStyle: (i, s) => { selIndex = i; setDmgStyle(s); },
+  previewHP: (frac) => { dmgPreviewHP = frac; applyDamagePreview(); },
+  partPos: (i) => { const m = parts()[i]; return m ? m.position.toArray() : null; },
+  partScale: (i) => { const m = parts()[i]; return m ? m.scale.toArray() : null; },
+  partFall: (i) => { const m = parts()[i]; return m ? { fallAt: m.userData.fallAt, style: m.userData.dmgStyle } : null; },
+  partMaps: (i) => { const m = parts()[i]; if (!m) return null; const t = m.material, a = t.map || t.bumpMap || t.roughnessMap; return { map: !!t.map, bump: !!t.bumpMap, spec: !!t.roughnessMap, bumpScale: t.bumpScale, tile: a ? [a.repeat.x, a.repeat.y] : null }; },
+  setGeomParam: (key, val) => { const m = parts()[selIndex]; if (m && m.userData.kind !== 'frozen') { m.userData.params[key] = val; rebuildGeo(); } },
+  partKind: (i) => parts()[i] ? parts()[i].userData.kind : null,
+  partColor: (i) => parts()[i] ? '#' + parts()[i].material.color.getHexString() : null,
+  transform: (op, axis, delta) => { toolMode = op; toolAxis = axis; applyTransform(delta); },
+  // element-edit hooks (headless): set mode, count welded groups, pick + move sub-geometry
+  setSelMode,
+  selMode: () => selMode,
+  vertexMode: (on) => setSelMode(on ? 'vertex' : 'object'),
+  vertGroupCount: () => (vertGroups ? vertGroups.length : 0),
+  setSelOp, selOp: () => selOp, selectAll: selectAllElements,
+  selCount: () => selGroupSet().length, selElemCount: () => selElems.length,
+  pickVertex: (i) => applyPick([i]),
+  pickEdge: (a, b) => applyPick([a, b]),
+  pickFace: (a, b, c) => applyPick([a, b, c]),
+  moveVertex: (axis, delta) => { toolMode = 'move'; toolAxis = axis; applyElementTransform(delta); },
+  moveElement: (op, axis, delta) => { toolMode = op; toolAxis = axis; applyElementTransform(delta); },
+  extrude: extrudeSelection, subdivide: subdivideMesh,
+  newAsset, deleteAsset: deleteUserAsset, assetCount: () => allAssets().length,
+  assetMeta: () => ({ id: meta.id, name: meta.name, category: meta.category, user: !!(currentAsset() && currentAsset().user) }),
+  triCount: () => { const g = parts()[selIndex] && parts()[selIndex].geometry; return g ? (g.index ? g.index.count : g.attributes.position.count) / 3 : 0; },
+  vertPos: (i) => { const m = parts()[selIndex]; if (!m || !vertGroups) return null; const p = m.geometry.attributes.position, g = vertGroups[i]; return [p.getX(g[0]), p.getY(g[0]), p.getZ(g[0])]; },
+  setSnap: (s) => { snap = s; },
+  setMeta: (k, v) => { meta[k] = v; refreshStats(); },
+  exportConfig, importConfig,
+  measureAll: () => ASSETS.map(a => {
+    const g = a.make(CELL, new THREE.Color('#c0392b')); g.updateMatrixWorld(true);
+    const s = new THREE.Vector3(); new THREE.Box3().setFromObject(g).getSize(s);
+    return { id: a.id, footprint: a.footprint, measured: { w: Math.max(1, Math.ceil((s.x - 1e-4) / CELL)), d: Math.max(1, Math.ceil((s.z - 1e-4) / CELL)) } };
+  }),
+};
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+// Reopen the asset you last had open (autosaved), falling back to the first one.
+let _startIdx = 0;
+try { const v = parseInt(localStorage.getItem('assetdesigner:_last'), 10); if (Number.isInteger(v) && v >= 0 && v < allAssets().length) _startIdx = v; } catch (e) { /* private mode */ }
+loadAsset(_startIdx);
+setSelMode('object');
+setSelOp('normal');
+updateCamera();
+(function animate() { requestAnimationFrame(animate); renderer.render(scene, camera); })();
