@@ -11,8 +11,8 @@ for vehicles.
 
 ## The contract
 - The shared manifest lives in the **game** project:
-  `../riposte-run/js/assets.manifest.js`. Both this tool and the game read it.
-- **Dependency is one-way:** this tool imports from `../riposte-run/`; the
+  `https://rmrfbase.com/js/assets.manifest.js`. Both this tool and the game read it.
+- **Dependency is one-way:** this tool imports from `https://rmrfbase.com/`; the
   shipped game NEVER imports from here. (The game stays self-contained for
   Amplify; these dev tools are not deployed.)
 

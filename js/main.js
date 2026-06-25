@@ -4,13 +4,13 @@
 // select by raycast, move/scale/rotate per axis, recolour, edit metadata
 // (HP/footprint), and save/export/import a JSON config per asset.
 //
-// Dependency is ONE WAY: imports from ../../riposte-run/; the game never imports
+// Dependency is ONE WAY: imports from https://rmrfbase.com/; the game never imports
 // from here. Mobile-friendly collapsing widgets in each corner + pinch-zoom.
 
 import * as THREE from 'three';
-import { ASSETS } from '../../riposte-run/js/assets.manifest.js?v=4';
-import { TEAM_COLORS } from '../../riposte-run/js/CamoTexture.js';
-import { concreteTexture, ribbedMetalTexture, fabricTexture, crateTexture, roofTexture, accentPlateTexture, hazardTexture } from '../../riposte-run/js/Textures.js?v=2';
+import { ASSETS } from 'https://rmrfbase.com/js/assets.manifest.js?v=4';
+import { TEAM_COLORS } from 'https://rmrfbase.com/js/CamoTexture.js';
+import { concreteTexture, ribbedMetalTexture, fabricTexture, crateTexture, roofTexture, accentPlateTexture, hazardTexture } from 'https://rmrfbase.com/js/Textures.js?v=2';
 
 // Procedural textures available to apply in the MATERIAL menu.
 const TEX = {
