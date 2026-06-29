@@ -77,16 +77,30 @@ function makeArrow(axis, mat) {
 // Curved ring handle (shown for ROTATE) — lies in the plane the axis spins IN
 // (perpendicular to the axis), so it reads as "turn around this axis".
 function makeArc(axis, mat) {
-  const arc = new THREE.Mesh(new THREE.TorusGeometry(0.85, 0.05, 8, 28, Math.PI * 0.7), mat);
+  // a FULL ring (not a partial arc) — the three circles sit in clearly different planes
+  // so X/Y/Z read apart and each has lots of unambiguous area to grab (partial arcs
+  // overlapped near the poles, where two rings cross, making X and Z feel like one axis).
+  const arc = new THREE.Mesh(new THREE.TorusGeometry(0.85, 0.04, 8, 48), mat);
   if (axis === 'x') arc.rotation.y = Math.PI / 2;        // ring around X (YZ plane)
   else if (axis === 'y') arc.rotation.x = Math.PI / 2;   // ring around Y (XZ plane); Z uses the default XY plane
   arc.userData.axis = axis; arc.renderOrder = 1001;
   return arc;
 }
+// Box-tipped handle (shown for SCALE) — Blender-style, so scale reads differently
+// from the move arrow and the rotate ring at a glance.
+function makeScaleHandle(axis, mat) {
+  const g = new THREE.Group();
+  const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.045, 0.92, 8), mat); shaft.position.y = 0.46;
+  const knob = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.22, 0.22), mat); knob.position.y = 1.03;
+  g.add(shaft, knob);
+  if (axis === 'x') g.rotation.z = -Math.PI / 2; else if (axis === 'z') g.rotation.x = Math.PI / 2;   // +Y handle → axis
+  g.traverse(o => { o.userData.axis = axis; o.renderOrder = 1001; });
+  return g;
+}
 const gizmo = new THREE.Group(); gizmo.visible = false; scene.add(gizmo);
 const gizmoSets = Object.entries(GIZMO_AXES).map(([ax, c]) => {
-  const mat = gizmoMat(c), arrow = makeArrow(ax, mat), arc = makeArc(ax, mat);
-  gizmo.add(arrow, arc); return { axis: ax, arrow, arc };
+  const mat = gizmoMat(c), arrow = makeArrow(ax, mat), scale = makeScaleHandle(ax, mat), arc = makeArc(ax, mat);
+  gizmo.add(arrow, scale, arc); return { axis: ax, arrow, scale, arc };
 });
 const gizmoSelActive = () => elemMode() ? hasSel() : (selSet.length > 0 || selIndex >= 0);
 const gizmoActive = () => !thumb && (toolMode === 'move' || toolMode === 'scale' || toolMode === 'rotate') && gizmoSelActive();
@@ -109,8 +123,8 @@ function updateGizmo() {
   const o = gizmoOrigin(); if (!o) { gizmo.visible = false; return; }
   gizmo.visible = true; gizmo.position.copy(o);
   gizmo.scale.setScalar(Math.max(1.5, camRadius * 0.11));   // constant on-screen size
-  const rot = toolMode === 'rotate';   // ROTATE → curved ring handles; MOVE/SCALE → arrows
-  for (const s of gizmoSets) { s.arrow.visible = !rot; s.arc.visible = rot; }
+  // distinct handle per tool: MOVE → arrows, SCALE → box-tipped, ROTATE → rings
+  for (const s of gizmoSets) { s.arrow.visible = toolMode === 'move'; s.scale.visible = toolMode === 'scale'; s.arc.visible = toolMode === 'rotate'; }
 }
 // A world axis at the gizmo origin → a normalised SCREEN direction (y DOWN, matching
 // pointer deltas), so a drag along the arrow maps to motion along that axis.
@@ -126,7 +140,7 @@ function raycastGizmo(px, py) {
   const r = renderer.domElement.getBoundingClientRect();
   const ndc = new THREE.Vector2(((px - r.left) / r.width) * 2 - 1, -((py - r.top) / r.height) * 2 + 1);
   raycaster.setFromCamera(ndc, camera);
-  const handles = gizmoSets.map(s => (toolMode === 'rotate' ? s.arc : s.arrow));   // only the visible set
+  const handles = gizmoSets.map(s => toolMode === 'rotate' ? s.arc : toolMode === 'scale' ? s.scale : s.arrow);   // only the visible set
   const hit = raycaster.intersectObjects(handles, true)[0];
   return hit ? hit.object.userData.axis : null;
 }
