@@ -44,6 +44,79 @@ scene.add(model);
 
 const selBox = new THREE.Box3Helper(new THREE.Box3(), 0xffd24a);
 selBox.visible = false; scene.add(selBox);
+// Dimmer boxes for the non-primary parts of a multi-selection.
+const multiBoxes = new THREE.Group(); scene.add(multiBoxes);
+function updateMultiSel() {
+  while (multiBoxes.children.length) { const h = multiBoxes.children[0]; multiBoxes.remove(h); h.geometry.dispose(); h.material.dispose(); }
+  if (thumb || elemMode()) return;   // multi-select boxes are an OBJECT-mode affordance
+  for (const i of selSet) {
+    if (i === selIndex) continue;   // primary uses selBox
+    const m = parts()[i]; if (!m) continue;
+    const b = new THREE.Box3Helper(new THREE.Box3().setFromObject(m), 0xffd24a);
+    b.material.transparent = true; b.material.opacity = 0.45;
+    multiBoxes.add(b);
+  }
+}
+
+// ── RGB transform gizmo ───────────────────────────────────────────────────────
+// Draggable X(red)/Y(green)/Z(blue) arrows at the selection. Grabbing an arrow picks
+// that axis and drives the active MOVE/SCALE/ROTATE tool as you drag along it — an
+// alternative to the axis buttons. Drawn over everything at a constant screen size.
+const GIZMO_AXES = { x: 0xff5555, y: 0x55ff77, z: 0x5599ff };
+function makeArrow(axis, color) {
+  const g = new THREE.Group();
+  const mat = new THREE.MeshBasicMaterial({ color, depthTest: false, transparent: true });
+  const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.045, 1, 8), mat); shaft.position.y = 0.5;
+  const head = new THREE.Mesh(new THREE.ConeGeometry(0.13, 0.32, 12), mat); head.position.y = 1.05;
+  g.add(shaft, head);
+  if (axis === 'x') g.rotation.z = -Math.PI / 2; else if (axis === 'z') g.rotation.x = Math.PI / 2;   // +Y arrow → axis
+  g.traverse(o => { o.userData.axis = axis; o.renderOrder = 1001; });
+  return g;
+}
+const gizmo = new THREE.Group(); gizmo.visible = false; scene.add(gizmo);
+const gizmoArrows = Object.entries(GIZMO_AXES).map(([ax, c]) => { const a = makeArrow(ax, c); gizmo.add(a); return a; });
+const gizmoSelActive = () => elemMode() ? hasSel() : (selSet.length > 0 || selIndex >= 0);
+const gizmoActive = () => !thumb && (toolMode === 'move' || toolMode === 'scale' || toolMode === 'rotate') && gizmoSelActive();
+// World position the gizmo sits at: object-mode = centre of the selected parts;
+// element-mode = world centroid of the selected verts.
+function gizmoOrigin() {
+  if (elemMode()) {
+    const m = parts()[selIndex], groups = selGroupSet(); if (!m || !vertGroups || !groups.length) return null;
+    const pos = m.geometry.attributes.position, c = new THREE.Vector3();
+    for (const g of groups) { const i = vertGroups[g][0]; c.add(new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i))); }
+    return m.localToWorld(c.multiplyScalar(1 / groups.length));
+  }
+  const idxs = selSet.length ? selSet : (selIndex >= 0 ? [selIndex] : []);
+  const box = new THREE.Box3();
+  for (const i of idxs) { const m = parts()[i]; if (m) box.expandByObject(m); }
+  return box.isEmpty() ? null : box.getCenter(new THREE.Vector3());
+}
+function updateGizmo() {
+  if (!gizmoActive()) { gizmo.visible = false; return; }
+  const o = gizmoOrigin(); if (!o) { gizmo.visible = false; return; }
+  gizmo.visible = true; gizmo.position.copy(o);
+  gizmo.scale.setScalar(Math.max(1.5, camRadius * 0.11));   // constant on-screen size
+}
+// A world axis at the gizmo origin → a normalised SCREEN direction (y DOWN, matching
+// pointer deltas), so a drag along the arrow maps to motion along that axis.
+function axisScreenDir(axis, origin) {
+  const o = origin.clone().project(camera);
+  const tip = origin.clone().add(new THREE.Vector3(axis === 'x' ? 1 : 0, axis === 'y' ? 1 : 0, axis === 'z' ? 1 : 0)).project(camera);
+  const sx = tip.x - o.x, sy = -(tip.y - o.y), len = Math.hypot(sx, sy) || 1;
+  return { x: sx / len, y: sy / len };
+}
+function raycastGizmo(px, py) {
+  if (!gizmo.visible) return null;
+  gizmo.updateMatrixWorld(true);   // click may land between render frames
+  const r = renderer.domElement.getBoundingClientRect();
+  const ndc = new THREE.Vector2(((px - r.left) / r.width) * 2 - 1, -((py - r.top) / r.height) * 2 + 1);
+  raycaster.setFromCamera(ndc, camera);
+  const hit = raycaster.intersectObjects(gizmoArrows, true)[0];
+  return hit ? hit.object.userData.axis : null;
+}
+function highlightAxisButton(axis) {
+  document.querySelectorAll('.tool.active .tool-kids button[data-axis]').forEach(b => b.classList.toggle('active', b.dataset.axis === axis));
+}
 
 // ── Camera (orbit around a target) ───────────────────────────────────────────
 const camera = new THREE.PerspectiveCamera(48, container.clientWidth / container.clientHeight, 0.1, 600);
@@ -55,6 +128,7 @@ function updateCamera() {
     target.y + Math.cos(camPhi) * camRadius,
     target.z + Math.cos(camTheta) * Math.sin(camPhi) * camRadius);
   camera.lookAt(target);
+  updateGizmo();   // keep the gizmo a constant on-screen size as we orbit/zoom
 }
 window.setCameraView = ({ theta, phi, radius } = {}) => {
   if (theta != null) camTheta = theta; if (phi != null) camPhi = phi; if (radius != null) camRadius = radius;
@@ -64,7 +138,8 @@ window.setCameraView = ({ theta, phi, radius } = {}) => {
 // ── State ─────────────────────────────────────────────────────────────────────
 let activeIndex = 0;
 let accentIndex = 0;
-let selIndex = -1;
+let selIndex = -1;       // primary selection (drives the param panels / coords)
+let selSet = [];         // OBJECT-mode multi-selection (part indices); selIndex = the last picked
 let toolMode = null;   // 'add' | 'move' | 'scale' | 'rotate' | 'material' | null
 let matSub = null;     // which MATERIAL sub-tool is open: 'colors'|'textures'|'specular'|'bump'|null
 let dmgPreviewHP = 1;  // DAMAGE-tool preview health (1 = intact .. 0 = destroyed)
@@ -130,13 +205,18 @@ function makeMat(info) {
     if (info.emissive) { mat.emissive = new THREE.Color(info.emissive); mat.emissiveIntensity = info.emissiveIntensity; }
   }
   const tile = info.tile;
-  if (info.map) applyMapURL(mat, info.map, tile);
-  if (info.bumpTex) { mat.bumpMap = texFromURL(info.bumpTex, tile); mat.bumpScale = info.bumpScale ?? 0.4; }
+  // Prefer a procedural KIND id (rebuilt fresh, no base64); fall back to a stored data URL.
+  if (info.mapKind && TEX[info.mapKind]) mat.map = buildTex(info.mapKind, tile || [1, 1]).tex;
+  else if (info.map) applyMapURL(mat, info.map, tile);
+  if (info.bumpKind && TEX[info.bumpKind]) { mat.bumpMap = buildTex(info.bumpKind, tile || [1, 1]).tex; mat.bumpScale = info.bumpScale ?? 0.4; }
+  else if (info.bumpTex) { mat.bumpMap = texFromURL(info.bumpTex, tile); mat.bumpScale = info.bumpScale ?? 0.4; }
   else if (info.bump && mat.map) { mat.bumpMap = mat.map; mat.bumpScale = info.bumpScale ?? 0.4; }   // legacy: shared colour map
   if (mat.isMeshStandardMaterial) {
-    if (info.specTex) mat.roughnessMap = texFromURL(info.specTex, tile);
+    if (info.specKind && TEX[info.specKind]) mat.roughnessMap = buildTex(info.specKind, tile || [1, 1]).tex;
+    else if (info.specTex) mat.roughnessMap = texFromURL(info.specTex, tile);
     else if (info.spec && mat.map) mat.roughnessMap = mat.map;   // legacy
   }
+  mat.needsUpdate = true;
   return mat;
 }
 
@@ -222,7 +302,7 @@ function buildFromMake(asset) {
   });
 }
 
-function clearModel() { clearVertHandles(); while (model.children.length) { const m = model.children[0]; model.remove(m); m.geometry.dispose(); } selIndex = -1; selBox.visible = false; }
+function clearModel() { clearVertHandles(); while (model.children.length) { const m = model.children[0]; model.remove(m); m.geometry.dispose(); } selIndex = -1; selSet = []; updateMultiSel(); selBox.visible = false; }
 
 function loadAsset(i, { fresh = false } = {}) {
   flushSave();   // persist the asset we're leaving before we swap it out
@@ -244,6 +324,7 @@ function loadAsset(i, { fresh = false } = {}) {
   frameModel();
   if (dmgActive()) { dmgSnapshot(); dmgPreviewHP = 1; }   // switched assets mid-DAMAGE: re-arm the preview
   refreshAssetTabs(); refreshStats();
+  resetHistory();   // undo history is per-asset
 }
 
 function frameModel() {
@@ -258,23 +339,36 @@ function frameModel() {
 
 // ── Selection ─────────────────────────────────────────────────────────────────
 const raycaster = new THREE.Raycaster();
-function raycastSelect(px, py) {
+// additive (shift) toggles the hit part in/out of the multi-selection; otherwise it
+// replaces the selection with the single hit (or clears it).
+function raycastSelect(px, py, additive = false) {
   const r = renderer.domElement.getBoundingClientRect();
   const ndc = new THREE.Vector2(((px - r.left) / r.width) * 2 - 1, -((py - r.top) / r.height) * 2 + 1);
   raycaster.setFromCamera(ndc, camera);
   const hit = raycaster.intersectObjects(parts(), false)[0];
-  selIndex = hit ? parts().indexOf(hit.object) : -1;
+  const idx = hit ? parts().indexOf(hit.object) : -1;
+  if (additive && !elemMode()) {
+    if (idx >= 0) { const at = selSet.indexOf(idx); if (at >= 0) selSet.splice(at, 1); else selSet.push(idx); }
+    selIndex = selSet.length ? selSet[selSet.length - 1] : -1;
+  } else {
+    selIndex = idx; selSet = idx >= 0 ? [idx] : [];
+  }
   updateSel();
 }
 function updateSel() {
   const m = parts()[selIndex];
-  if (m) { selBox.box.setFromObject(m); selBox.visible = !thumb; document.getElementById('sel-tag').textContent = `▣ part ${selIndex + 1}/${parts().length}`; }
+  if (m) {
+    selBox.box.setFromObject(m); selBox.visible = !thumb;
+    document.getElementById('sel-tag').textContent = selSet.length > 1 ? `▣ ${selSet.length} parts` : `▣ part ${selIndex + 1}/${parts().length}`;
+  }
   else { selBox.visible = false; document.getElementById('sel-tag').textContent = ''; }
+  updateMultiSel();
   refreshStats();
   refreshGeomParams();
   refreshMatParams();
   refreshDmgParams();
   syncMapButtons();
+  updateGizmo();
 }
 
 // ── Transform (axis-constrained drag) ────────────────────────────────────────
@@ -283,11 +377,21 @@ const transformActive = () => !elemMode() && (toolMode === 'move' || toolMode ==
 let snap = 0;
 function snapVal(v) { return snap > 0 ? +(Math.round(v / snap) * snap).toFixed(4) : v; }
 function applyTransform(dx) {
-  const m = parts()[selIndex]; if (!m) return;
-  if (toolMode === 'move') m.position[toolAxis] = snapVal(m.position[toolAxis] + dx * 0.04);
-  else if (toolMode === 'scale') m.scale[toolAxis] = Math.max(0.05, snapVal(m.scale[toolAxis] + dx * 0.012));
-  else if (toolMode === 'rotate') m.rotation[toolAxis] = snapVal(m.rotation[toolAxis] * 180 / Math.PI + dx * 1.2) * Math.PI / 180;   // snap in degrees
-  selBox.box.setFromObject(m);
+  // act on the whole multi-selection (each part transforms about its own origin)
+  const targets = (selSet.length ? selSet : (selIndex >= 0 ? [selIndex] : [])).map(i => parts()[i]).filter(Boolean);
+  if (!targets.length) return;
+  for (const m of targets) {
+    if (toolMode === 'move') m.position[toolAxis] = snapVal(m.position[toolAxis] + dx * 0.04);
+    else if (toolMode === 'scale') {
+      // ALL = uniform scale (grow/shrink the whole part); otherwise one axis.
+      for (const ax of (toolAxis === 'all' ? ['x', 'y', 'z'] : [toolAxis]))
+        m.scale[ax] = Math.max(0.05, snapVal(m.scale[ax] + dx * 0.012));
+    }
+    else if (toolMode === 'rotate') m.rotation[toolAxis] = snapVal(m.rotation[toolAxis] * 180 / Math.PI + dx * 1.2) * Math.PI / 180;   // snap in degrees
+  }
+  const pm = parts()[selIndex]; if (pm) selBox.box.setFromObject(pm);
+  updateMultiSel();
+  updateGizmo();
   refreshStats();
 }
 
@@ -471,8 +575,10 @@ function applyElementTransform(dx) {
     const d = snap > 0 ? snapVal(dx * 0.04) : dx * 0.04;
     for (const i of idxs) pos.setComponent(i, comp, pos.getComponent(i, comp) + d);
   } else if (toolMode === 'scale') {
+    // ALL scales toward/away from the selection's shared centre on every axis at once.
     const c = elemCentroid(pos, idxs), f = Math.max(0.02, 1 + dx * 0.01);
-    for (const i of idxs) pos.setComponent(i, comp, c[comp] + (pos.getComponent(i, comp) - c[comp]) * f);
+    const comps = toolAxis === 'all' ? [0, 1, 2] : [comp];
+    for (const i of idxs) for (const cc of comps) pos.setComponent(i, cc, c[cc] + (pos.getComponent(i, cc) - c[cc]) * f);
   } else {   // rotate about the centroid, around the chosen axis
     const c = elemCentroid(pos, idxs), ang = dx * 0.02;
     const [u, w] = comp === 0 ? [1, 2] : comp === 1 ? [0, 2] : [0, 1];
@@ -485,7 +591,7 @@ function applyElementTransform(dx) {
   }
   pos.needsUpdate = true; m.geometry.computeVertexNormals();
   markCustom(m); syncHandles(m); updateElemHilite();
-  selBox.box.setFromObject(m); refreshStats();
+  selBox.box.setFromObject(m); updateGizmo(); refreshStats();
   if (selMode === 'vertex') refreshCoords();
 }
 function elemCentroid(pos, idxs) {
@@ -508,6 +614,26 @@ function readTriangles(m) {
   else for (let i = 0; i < pos.count; i += 3) push(i, i + 1, i + 2);
   return tris;
 }
+// Box/planar-project UVs onto a non-indexed triangle soup so textured parts keep
+// their map after EXTRUDE/SUBDIVIDE (the rebuilt geometry would otherwise have no
+// UVs and render the bare colour). Each triangle projects onto its dominant axis;
+// 1 UV unit = 1 model unit, so the material's own tiling still drives repeat.
+function planarUVs(g) {
+  const pos = g.attributes.position, n = pos.count, uv = new Float32Array(n * 2);
+  for (let i = 0; i < n; i += 3) {
+    const ax = pos.getX(i), ay = pos.getY(i), az = pos.getZ(i);
+    const ux = pos.getX(i + 1) - ax, uy = pos.getY(i + 1) - ay, uz = pos.getZ(i + 1) - az;
+    const vx = pos.getX(i + 2) - ax, vy = pos.getY(i + 2) - ay, vz = pos.getZ(i + 2) - az;
+    const nx = Math.abs(uy * vz - uz * vy), ny = Math.abs(uz * vx - ux * vz), nz = Math.abs(ux * vy - uy * vx);
+    const pick = (nx >= ny && nx >= nz) ? 0 : (ny >= nz) ? 1 : 2;   // dominant normal axis
+    for (let k = 0; k < 3; k++) {
+      const X = pos.getX(i + k), Y = pos.getY(i + k), Z = pos.getZ(i + k);
+      const s = pick === 0 ? Z : X, t = pick === 1 ? Z : Y;
+      uv[(i + k) * 2] = s; uv[(i + k) * 2 + 1] = t;
+    }
+  }
+  g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+}
 // Replace the mesh with a fresh non-indexed triangle soup (a flat list of Vector3s,
 // 3 per triangle), re-weld handles, freeze it. Caller manages the selection after.
 function commitTriangleSoup(m, pts) {
@@ -516,6 +642,7 @@ function commitTriangleSoup(m, pts) {
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.BufferAttribute(arr, 3));
   g.computeVertexNormals();
+  planarUVs(g);
   m.geometry.dispose(); m.geometry = g;
   m.userData.kind = 'frozen'; m.userData.params = null; m.userData.parametric = false;
   buildVertHandles();   // re-weld + rebuild the green handle cloud (clears selElems)
@@ -599,6 +726,31 @@ function extrudeSelection() {
   reselectFaces(cap);   // new cap stays selected for an immediate MOVE
   updateHint();
 }
+// FLIP a quad's diagonal: select its TWO triangles (FACE mode) — they share an edge
+// (the current diagonal); this re-triangulates the quad across the OTHER two corners.
+function flipQuad() {
+  const m = parts()[selIndex];
+  if (!m || !elemMode() || !vertGroups) { msg('FLIP: select 2 faces of a quad'); return; }
+  const faces = selElems.filter(e => e.length === 3);
+  if (faces.length !== 2) { document.getElementById('hint').textContent = 'FLIP needs exactly 2 FACES (a quad) selected'; return; }
+  const [t1, t2] = faces;
+  const shared = t1.filter(g => t2.includes(g));               // the current diagonal (2 shared corners)
+  if (shared.length !== 2 || new Set([...t1, ...t2]).size !== 4) { msg("FLIP: those faces don't share an edge"); return; }
+  const [s1, s2] = shared;
+  const o1 = t1.find(g => !shared.includes(g)), o2 = t2.find(g => !shared.includes(g));   // the off-diagonal corners
+  const pos = m.geometry.attributes.position;
+  const P = g => new THREE.Vector3(pos.getX(vertGroups[g][0]), pos.getY(vertGroups[g][0]), pos.getZ(vertGroups[g][0]));
+  const sigs = new Set([elemSig(t1), elemSig(t2)]);
+  const out = [];
+  for (const t of readTriangles(m)) { if (t.g && sigs.has(elemSig(t.g))) continue; out.push(t.v[0], t.v[1], t.v[2]); }
+  const a = P(o1), b = P(o2), c = P(s1), d = P(s2);
+  out.push(a.clone(), c.clone(), b.clone());   // new diagonal runs o1↔o2
+  out.push(a.clone(), b.clone(), d.clone());
+  commitTriangleSoup(m, out);
+  reselectFaces([[a, c, b], [a, b, d]]);
+  updateHint(); scheduleSave();
+  msg('flipped quad diagonal');
+}
 // Switch element-selection mode (the right-side icon toolbar).
 function setSelMode(mode) {
   selMode = mode;
@@ -608,7 +760,8 @@ function setSelMode(mode) {
   document.getElementById('w-selop').style.display = elemMode() ? '' : 'none';
   selElems = [];   // switching element type drops the (now-incompatible) selection
   if (mode === 'object') clearVertHandles();
-  else { buildVertHandles(); updateElemHilite(); }
+  else { selSet = selIndex >= 0 ? [selIndex] : []; buildVertHandles(); updateElemHilite(); }   // element edits are single-part
+  updateMultiSel();
   updateHint();
 }
 // Switch how a pick combines with the selection (the left-side toolbar).
@@ -622,7 +775,7 @@ function setSelOp(op) {
 function addMesh(kind) {
   const mesh = addPart({ kind, params: defaultParams(kind), pos: [0, 1.5, 0], rot: [0, 0, 0], scale: [1, 1, 1],
     mat: { kind: 'standard', color: '#b0b6bb', roughness: 0.8, metalness: 0.1, flatShading: true, emissive: null, emissiveIntensity: 0, opacity: 1, transparent: false } });
-  selIndex = parts().indexOf(mesh); updateSel();
+  selIndex = parts().indexOf(mesh); selSet = [selIndex]; updateSel();
 }
 // Rebuild the selected parametric part's geometry from its (edited) params.
 function rebuildGeo() {
@@ -668,8 +821,27 @@ function refreshGeomParams() {
   }));
 }
 function deleteSelected() {
-  const m = parts()[selIndex]; if (!m) return;
-  model.remove(m); m.geometry.dispose(); selIndex = -1; updateSel();
+  // delete the whole multi-selection (high index first so the rest stay valid)
+  const idxs = (selSet.length ? selSet : (selIndex >= 0 ? [selIndex] : [])).slice().sort((a, b) => b - a);
+  if (!idxs.length) return;
+  for (const i of idxs) { const m = parts()[i]; if (m) { model.remove(m); m.geometry.dispose(); } }
+  selIndex = -1; selSet = []; updateSel();
+}
+// Duplicate the selected part (offset slightly so the copy is visible) and select it.
+// Parametric parts copy their params; custom/frozen meshes copy their exact geometry.
+function duplicateSelected() {
+  const m = parts()[selIndex]; if (!m) { msg('select a part to copy'); return; }
+  const u = m.userData, keepGeo = u.kind === 'frozen' || !u.parametric;
+  const mesh = addPart({
+    kind: u.kind, params: u.params ? { ...u.params } : null,
+    geometry: keepGeo ? new THREE.BufferGeometry().copy(m.geometry) : undefined,
+    pos: [m.position.x + 1, m.position.y, m.position.z + 1],
+    rot: [m.rotation.x, m.rotation.y, m.rotation.z], scale: m.scale.toArray(),
+    mat: JSON.parse(JSON.stringify(u.mat)), parametric: u.parametric,
+    fallAt: u.fallAt, dmgStyle: u.dmgStyle,
+  });
+  selIndex = parts().indexOf(mesh); selSet = [selIndex]; updateSel(); scheduleSave();
+  msg('duplicated part');
 }
 function setColor(hex) {
   const m = parts()[selIndex]; if (!m) return;
@@ -693,11 +865,13 @@ function applyAccent(hex) {
 function applyTexture(kind) {
   const m = parts()[selIndex]; if (!m) return;
   const mat = m.material, u = m.userData.mat;
-  if (kind === 'none') { mat.map = null; u.map = null; }
+  if (kind === 'none') { mat.map = null; u.map = null; u.mapKind = null; }
   else {
     const { tex, url } = buildTex(kind, u.tile || [1, 1]);
     mat.map = tex; mat.color.set('#ffffff');     // white base so the texture reads true
-    u.color = '#ffffff'; u.map = url; u.tile = u.tile || [1, 1];
+    // remember the procedural KIND so export can reference it by id (no fat base64);
+    // u.map keeps the data URL only as a fallback for round-tripping.
+    u.color = '#ffffff'; u.map = url; u.mapKind = kind; u.tile = u.tile || [1, 1];
   }
   mat.needsUpdate = true; refreshMatParams(); syncMapButtons();
 }
@@ -706,10 +880,10 @@ function applyBumpTex(kind) {
   const m = parts()[selIndex]; if (!m) return;
   const mat = m.material, u = m.userData.mat;
   if (!mat.isMeshStandardMaterial) return;   // bump needs a lit material
-  if (kind === 'none') { mat.bumpMap = null; u.bumpTex = null; }
+  if (kind === 'none') { mat.bumpMap = null; u.bumpTex = null; u.bumpKind = null; }
   else {
     const { tex, url } = buildTex(kind, u.tile || [1, 1]);
-    mat.bumpMap = tex; mat.bumpScale = u.bumpScale ?? 0.4; u.bumpTex = url; u.bumpScale = mat.bumpScale; u.tile = u.tile || [1, 1];
+    mat.bumpMap = tex; mat.bumpScale = u.bumpScale ?? 0.4; u.bumpTex = url; u.bumpKind = kind; u.bumpScale = mat.bumpScale; u.tile = u.tile || [1, 1];
   }
   mat.needsUpdate = true;
 }
@@ -718,10 +892,10 @@ function applySpecTex(kind) {
   const m = parts()[selIndex]; if (!m) return;
   const mat = m.material, u = m.userData.mat;
   if (!mat.isMeshStandardMaterial) return;
-  if (kind === 'none') { mat.roughnessMap = null; u.specTex = null; }
+  if (kind === 'none') { mat.roughnessMap = null; u.specTex = null; u.specKind = null; }
   else {
     const { tex, url } = buildTex(kind, u.tile || [1, 1]);
-    mat.roughnessMap = tex; u.specTex = url; u.tile = u.tile || [1, 1];
+    mat.roughnessMap = tex; u.specTex = url; u.specKind = kind; u.tile = u.tile || [1, 1];
   }
   mat.needsUpdate = true;
 }
@@ -837,6 +1011,16 @@ function refreshDmgParams() {
 }
 
 // ── Export / import / save ───────────────────────────────────────────────────
+// Slim a material for export: when a map came from a procedural KIND, ship the id
+// (mapKind/bumpKind/specKind) and drop the fat base64 data URL — makeMat rebuilds it.
+// Baked textures (no kind) keep their data URL so they still round-trip exactly.
+function serializeMat(u) {
+  const m = { ...u };
+  if (m.mapKind) delete m.map;
+  if (m.bumpKind) delete m.bumpTex;
+  if (m.specKind) delete m.specTex;
+  return m;
+}
 function exportConfig() {
   return {
     id: meta.id, name: meta.name, category: meta.category, accent: meta.accent,
@@ -853,7 +1037,7 @@ function exportConfig() {
         pos: s0 ? s0.pos : m.position.toArray(),
         rot: s0 ? s0.rot : [m.rotation.x, m.rotation.y, m.rotation.z],
         scale: s0 ? s0.scale : m.scale.toArray(),
-        mat: u.mat, fallAt: u.fallAt ?? 0, dmgStyle: u.dmgStyle || 'tumble',
+        mat: serializeMat(u.mat), fallAt: u.fallAt ?? 0, dmgStyle: u.dmgStyle || 'tumble',
       };
       if (editable && u.parametric) {
         part.params = u.params || {};                // param-edited → rebuild from params on load
@@ -1092,9 +1276,42 @@ const msg = (t) => { document.getElementById('export-msg').textContent = t; };
 const LS_KEY = (id) => 'assetdesigner:' + id;
 let saveTimer = null;
 
+// ── Undo / redo ───────────────────────────────────────────────────────────────
+// A history of SETTLED states (each a serialised exportConfig). recordHistory runs
+// on the same path as autosave (an edit settling), banking the PRIOR state so undo
+// can return to it; restoreState replays a snapshot without re-recording. History is
+// per-asset — switching assets resets it.
+const UNDO_MAX = 40;
+let undoStack = [], redoStack = [], present = null, applyingHistory = false;
+function snapshotState() { try { return JSON.stringify(exportConfig()); } catch (e) { return null; } }
+function updateUndoButtons() {
+  const u = document.getElementById('btn-undo'), r = document.getElementById('btn-redo');
+  if (u) u.disabled = !undoStack.length;
+  if (r) r.disabled = !redoStack.length;
+}
+function resetHistory() { undoStack = []; redoStack = []; present = snapshotState(); updateUndoButtons(); }
+function recordHistory() {
+  if (applyingHistory) return;
+  const s = snapshotState(); if (s == null || s === present) return;
+  if (present != null) { undoStack.push(present); if (undoStack.length > UNDO_MAX) undoStack.shift(); }
+  present = s; redoStack = [];   // a fresh edit invalidates the redo trail
+  updateUndoButtons();
+}
+function restoreState(s) {
+  applyingHistory = true;
+  try { importConfig(JSON.parse(s), { silent: true }); selIndex = -1; if (elemMode()) clearVertHandles(); updateSel(); }
+  finally { applyingHistory = false; }
+  present = s;
+  try { localStorage.setItem(LS_KEY(meta.id), s); } catch (e) { /* quota — the edit still applied */ }
+  updateUndoButtons();
+}
+function undo() { if (!undoStack.length) { msg('nothing to undo'); return; } redoStack.push(present); restoreState(undoStack.pop()); msg('undo ✓'); }
+function redo() { if (!redoStack.length) { msg('nothing to redo'); return; } undoStack.push(present); restoreState(redoStack.pop()); msg('redo ✓'); }
+
 // Persist the working asset to localStorage (quota-guarded). exportConfig captures
 // every part + geometry/material, so reopening this asset restores the edits.
 function saveLocal() {
+  recordHistory();   // bank the just-settled state for undo (same trigger as autosave)
   try {
     localStorage.setItem(LS_KEY(meta.id), JSON.stringify(exportConfig()));
     msg('saved locally ✓'); flashSaved('saved ✓');
@@ -1125,6 +1342,17 @@ document.getElementById('btn-import').addEventListener('click', () => {
 });
 document.getElementById('btn-save').addEventListener('click', saveLocal);
 const _resetBtn = document.getElementById('btn-reset'); if (_resetBtn) _resetBtn.addEventListener('click', resetAsset);
+const _undoBtn = document.getElementById('btn-undo'); if (_undoBtn) _undoBtn.addEventListener('click', undo);
+const _redoBtn = document.getElementById('btn-redo'); if (_redoBtn) _redoBtn.addEventListener('click', redo);
+// Keyboard: Ctrl/Cmd+Z = undo, Ctrl+Shift+Z / Ctrl+Y = redo (ignored while typing in a field).
+window.addEventListener('keydown', e => {
+  const t = e.target; if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
+  if (!(e.ctrlKey || e.metaKey)) return;
+  const k = e.key.toLowerCase();
+  if (k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); }
+  else if (k === 'y') { e.preventDefault(); redo(); }
+  else if (k === 'd') { e.preventDefault(); duplicateSelected(); }
+});
 
 // AUTOSAVE: persist shortly after any edit gesture (a drag, a tap on a tool/swatch, a
 // typed value), debounced so a drag is a single write. Loading an asset isn't a user
@@ -1137,6 +1365,7 @@ document.querySelectorAll('.tool > .tool-btn').forEach(btn => {
   btn.addEventListener('click', () => {
     const t = tool.dataset.tool;
     if (t === 'delete') { deleteSelected(); return; }
+    if (t === 'dupe') { duplicateSelected(); return; }     // immediate action, no flyout
     if (t === 'extrude') { extrudeSelection(); return; }   // immediate action, no flyout
     const opening = !tool.classList.contains('active');
     document.querySelectorAll('.tool').forEach(x => x.classList.remove('active'));
@@ -1157,6 +1386,7 @@ document.querySelectorAll('.tool-kids button[data-axis]').forEach(b => b.addEven
   b.parentElement.querySelectorAll('button').forEach(x => x.classList.remove('active')); b.classList.add('active');
   toolAxis = b.dataset.axis; updateHint();
 }));
+document.querySelectorAll('.tool-kids button[data-quadflip]').forEach(b => b.addEventListener('click', flipQuad));
 // element-selection mode toolbar (Blender-style: OBJECT / VERTEX / EDGE / FACE)
 document.querySelectorAll('.selmode-btn').forEach(b => b.addEventListener('click', () => setSelMode(b.dataset.selmode)));
 // selection-op toolbar (left): NORMAL / ADD / SUBTRACT modes + a SELECT-ALL action
@@ -1173,7 +1403,7 @@ function updateHint() {
       : `${n} ${lblN} SELECTED${op}  •  pick MOVE/SCALE/ROTATE + an axis to edit`;
   }
   else if (transformActive()) txt = `DRAG = ${toolMode.toUpperCase()} ${toolAxis.toUpperCase()}  •  tap ${toolMode.toUpperCase()} to exit`;
-  else txt = 'TAP MESH = SELECT • DRAG = ORBIT • PINCH = ZOOM';
+  else txt = 'TAP = SELECT • SHIFT-TAP = MULTI • DRAG = ORBIT • PINCH = ZOOM';
   document.getElementById('hint').textContent = txt;
   // the shared top box reshapes to the active tool: coords (pos/scale/rot/vert) +
   // geom params when editing geometry; tiling only under MATERIAL ▸ TEXTURES.
@@ -1181,18 +1411,30 @@ function updateHint() {
   refreshGeomParams();
   refreshMatParams();
   refreshDmgParams();
+  updateGizmo();
 }
 
 // ── Pointer: tap=select, 1-finger drag=orbit/transform, 2-finger=pinch ───────
 const canvas = renderer.domElement;
 const pts = new Map();   // pointerId -> {x,y}
-let dragId = null, lastX = 0, lastY = 0, downX = 0, downY = 0, moved = false, pinchD = 0;
+let dragId = null, lastX = 0, lastY = 0, downX = 0, downY = 0, moved = false, pinchD = 0, orbitBtn = false;
+let gizmoDrag = null;   // {x,y} screen-space axis direction while dragging a gizmo arrow
 const dist2 = () => { const a = [...pts.values()]; return Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y); };
 
 canvas.addEventListener('pointerdown', e => {
   pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
-  if (pts.size === 1) { dragId = e.pointerId; lastX = downX = e.clientX; lastY = downY = e.clientY; moved = false; }
-  else if (pts.size === 2) { pinchD = dist2(); dragId = null; }
+  // MIDDLE mouse (button 1) always orbits, even when a transform tool is armed.
+  if (pts.size === 1) {
+    dragId = e.pointerId; lastX = downX = e.clientX; lastY = downY = e.clientY; moved = false;
+    orbitBtn = e.button === 1; if (orbitBtn) e.preventDefault();
+    // grab a gizmo arrow? → lock that axis and drag-transform along it
+    gizmoDrag = null;
+    if (!orbitBtn) {
+      const ax = raycastGizmo(e.clientX, e.clientY);
+      if (ax) { toolAxis = ax; highlightAxisButton(ax); const o = gizmoOrigin(); gizmoDrag = o ? axisScreenDir(ax, o) : { x: 1, y: 0 }; }
+    }
+  }
+  else if (pts.size === 2) { pinchD = dist2(); dragId = null; gizmoDrag = null; }
 });
 canvas.addEventListener('pointermove', e => {
   if (!pts.has(e.pointerId)) return;
@@ -1205,23 +1447,29 @@ canvas.addEventListener('pointermove', e => {
   if (e.pointerId !== dragId) return;
   const dx = e.clientX - lastX, dy = e.clientY - lastY; lastX = e.clientX; lastY = e.clientY;
   if (Math.hypot(e.clientX - downX, e.clientY - downY) > SLOP) moved = true;
-  if (elemDragActive()) applyElementTransform(dx);
-  else if (transformActive()) applyTransform(dx);
+  if (gizmoDrag) {   // dragging an arrow → motion projected onto its screen axis
+    const along = dx * gizmoDrag.x + dy * gizmoDrag.y;
+    if (elemMode()) applyElementTransform(along); else applyTransform(along);
+  }
+  else if (!orbitBtn && elemDragActive()) applyElementTransform(dx);
+  else if (!orbitBtn && transformActive()) applyTransform(dx);
   else { camTheta -= dx * 0.008; camPhi = Math.max(0.1, Math.min(1.5, camPhi - dy * 0.008)); updateCamera(); }
 });
 function endPointer(e) {
   const wasDrag = e.pointerId === dragId;
   pts.delete(e.pointerId);
   if (wasDrag) {
-    if (!moved) {
+    if (!moved && !orbitBtn && !gizmoDrag) {
       if (elemMode()) {
         const groups = pickElement(downX, downY);
         if (groups) applyPick(groups);
         else { raycastSelect(downX, downY); buildVertHandles(); selElems = []; updateElemHilite(); }
       }
-      else if (!transformActive()) raycastSelect(downX, downY);
+      // a clean tap reselects even while a MOVE/SCALE/ROTATE tool is armed;
+      // SHIFT-tap toggles the part in/out of a multi-selection.
+      else raycastSelect(downX, downY, e.shiftKey);
     }
-    dragId = null;
+    dragId = null; orbitBtn = false; gizmoDrag = null;
   }
   if (pts.size === 1) { const [id, p] = [...pts.entries()][0]; dragId = id; lastX = downX = p.x; lastY = downY = p.y; moved = true; }
   if (pts.size >= 2) pinchD = dist2();
@@ -1256,7 +1504,9 @@ window.AD = {
   assets: ASSETS,
   select: (i) => loadAsset(i, { fresh: true }),   // fresh = ignore localStorage (thumbnails want code default)
   thumbMode,
-  selectPart: (i) => { selIndex = i; updateSel(); },
+  selectPart: (i) => { selIndex = i; selSet = i >= 0 ? [i] : []; updateSel(); },
+  shiftSelect: (i) => { const at = selSet.indexOf(i); if (at >= 0) selSet.splice(at, 1); else selSet.push(i); selIndex = selSet.length ? selSet[selSet.length - 1] : -1; updateSel(); },
+  selObjCount: () => selSet.length,
   partCount: () => parts().length,
   addMesh, deleteSelected, setColor, applyTexture, applyTeamColor,
   setAccent: (i) => { accentIndex = i; applyAccent(TEAM_COLORS[i].hex); },
@@ -1291,12 +1541,15 @@ window.AD = {
   pickFace: (a, b, c) => applyPick([a, b, c]),
   moveVertex: (axis, delta) => { toolMode = 'move'; toolAxis = axis; applyElementTransform(delta); },
   moveElement: (op, axis, delta) => { toolMode = op; toolAxis = axis; applyElementTransform(delta); },
-  extrude: extrudeSelection, subdivide: subdivideMesh,
+  extrude: extrudeSelection, subdivide: subdivideMesh, flipQuad,
   newAsset, deleteAsset: deleteUserAsset, assetCount: () => allAssets().length,
   assetMeta: () => ({ id: meta.id, name: meta.name, category: meta.category, user: !!(currentAsset() && currentAsset().user) }),
   triCount: () => { const g = parts()[selIndex] && parts()[selIndex].geometry; return g ? (g.index ? g.index.count : g.attributes.position.count) / 3 : 0; },
   vertPos: (i) => { const m = parts()[selIndex]; if (!m || !vertGroups) return null; const p = m.geometry.attributes.position, g = vertGroups[i]; return [p.getX(g[0]), p.getY(g[0]), p.getZ(g[0])]; },
   setSnap: (s) => { snap = s; },
+  undo, redo, undoDepth: () => undoStack.length, redoDepth: () => redoStack.length,
+  gizmoVisible: () => gizmo.visible, gizmoOrigin: () => { const o = gizmoOrigin(); return o ? o.toArray() : null; },
+  duplicate: duplicateSelected, recordHistory,
   setMeta: (k, v) => { meta[k] = v; refreshStats(); },
   exportConfig, importConfig,
   measureAll: () => ASSETS.map(a => {

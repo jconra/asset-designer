@@ -200,6 +200,8 @@
         <div class="ehint">edits autosave locally · RESET reverts to the original</div>
         <textarea id="export-text" spellcheck="false" placeholder="asset JSON — Export to fill, or paste + Import"></textarea>
         <div class="ebtns">
+          <button id="btn-undo" disabled title="Ctrl+Z">↶ UNDO</button>
+          <button id="btn-redo" disabled title="Ctrl+Shift+Z">↷ REDO</button>
           <button id="btn-export">EXPORT</button>
           <button id="btn-import">IMPORT</button>
           <button id="btn-save">SAVE</button>
@@ -296,11 +298,11 @@
     </div>
     <div class="tool" data-tool="scale">
       <button class="tool-btn">⤢ SCALE</button>
-      <div class="tool-kids"><button data-axis="x">X</button><button data-axis="y">Y</button><button data-axis="z">Z</button></div>
+      <div class="tool-kids"><button data-axis="x">X</button><button data-axis="y">Y</button><button data-axis="z">Z</button><button data-axis="all">ALL</button></div>
     </div>
     <div class="tool" data-tool="rotate">
       <button class="tool-btn">⟳ ROTATE</button>
-      <div class="tool-kids"><button data-axis="x">X</button><button data-axis="y">Y</button><button data-axis="z">Z</button></div>
+      <div class="tool-kids"><button data-axis="x">X</button><button data-axis="y">Y</button><button data-axis="z">Z</button><button data-quadflip title="flip a selected quad's diagonal (FACE mode, 2 faces)">⤬ FLIP</button></div>
     </div>
     <div class="tool" data-tool="extrude">
       <button class="tool-btn">↑ EXTRUDE</button>
@@ -321,6 +323,9 @@
     <div class="tool" data-tool="damage">
       <button class="tool-btn">✸ DAMAGE</button>
       <div class="tool-kids"><button class="opt" data-dmgstyle="tumble">TUMBLE</button><button class="opt" data-dmgstyle="squish">SQUISH</button></div>
+    </div>
+    <div class="tool" data-tool="dupe">
+      <button class="tool-btn" title="Ctrl+D">⧉ DUPE</button>
     </div>
     <div class="tool" data-tool="delete">
       <button class="tool-btn">✕ DELETE</button>
@@ -360,6 +365,6 @@
     }
   }
   </script>
-  <script type="module" src="js/main.js?v=29"></script>
+  <script type="module" src="js/main.js?v=30"></script>
 </body>
 </html>
