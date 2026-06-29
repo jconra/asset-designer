@@ -10,13 +10,15 @@
 import * as THREE from 'three';
 import { ASSETS } from 'https://rmrfbase.com/js/assets.manifest.js?v=4';
 import { TEAM_COLORS } from 'https://rmrfbase.com/js/CamoTexture.js';
-import { concreteTexture, ribbedMetalTexture, fabricTexture, crateTexture, roofTexture, accentPlateTexture, hazardTexture } from 'https://rmrfbase.com/js/Textures.js?v=2';
+import { concreteTexture, ribbedMetalTexture, fabricTexture, crateTexture, roofTexture, accentPlateTexture, hazardTexture,
+  noiseTexture, grimeTexture, rustTexture, scratchedTexture } from 'https://rmrfbase.com/js/Textures.js?v=3';
 
 // Procedural textures available to apply in the MATERIAL menu.
 const TEX = {
   concrete: () => concreteTexture(), metal: () => ribbedMetalTexture(), fabric: () => fabricTexture(),
   crate: () => crateTexture(), roof: () => roofTexture(), accent: () => accentPlateTexture(),
   hazard: () => hazardTexture(),
+  noise: () => noiseTexture(), grime: () => grimeTexture(), rust: () => rustTexture(), scratched: () => scratchedTexture(),
 };
 
 const CELL = 5;
