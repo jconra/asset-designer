@@ -843,6 +843,17 @@ function duplicateSelected() {
   selIndex = parts().indexOf(mesh); selSet = [selIndex]; updateSel(); scheduleSave();
   msg('duplicated part');
 }
+// Turn the WHOLE asset around the world origin's Y axis (a fixed 90° step). Bakes the
+// turn into every part's transform — orbits its position about origin + spins its
+// orientation — so it exports/round-trips (vs. just rotating the display group).
+function rotateModelY(angle = Math.PI / 2) {
+  if (!parts().length) return;
+  const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), angle);
+  for (const m of parts()) { m.position.applyQuaternion(q); m.quaternion.premultiply(q); }
+  const sel = parts()[selIndex]; if (sel) selBox.box.setFromObject(sel);
+  refreshStats(); refreshCoords(); updateGizmo(); scheduleSave();
+  msg('rotated 90° around origin Y');
+}
 function setColor(hex) {
   const m = parts()[selIndex]; if (!m) return;
   m.material.color.set(hex); m.userData.mat.color = hex; m.userData.mat.team = false;   // a fixed colour is no longer team-driven
@@ -1366,6 +1377,7 @@ document.querySelectorAll('.tool > .tool-btn').forEach(btn => {
     const t = tool.dataset.tool;
     if (t === 'delete') { deleteSelected(); return; }
     if (t === 'dupe') { duplicateSelected(); return; }     // immediate action, no flyout
+    if (t === 'spinY') { rotateModelY(); return; }         // immediate action, no flyout
     if (t === 'extrude') { extrudeSelection(); return; }   // immediate action, no flyout
     const opening = !tool.classList.contains('active');
     document.querySelectorAll('.tool').forEach(x => x.classList.remove('active'));
@@ -1549,7 +1561,7 @@ window.AD = {
   setSnap: (s) => { snap = s; },
   undo, redo, undoDepth: () => undoStack.length, redoDepth: () => redoStack.length,
   gizmoVisible: () => gizmo.visible, gizmoOrigin: () => { const o = gizmoOrigin(); return o ? o.toArray() : null; },
-  duplicate: duplicateSelected, recordHistory,
+  duplicate: duplicateSelected, recordHistory, rotateModelY,
   setMeta: (k, v) => { meta[k] = v; refreshStats(); },
   exportConfig, importConfig,
   measureAll: () => ASSETS.map(a => {
