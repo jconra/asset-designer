@@ -911,7 +911,8 @@ function deleteSelected() {
   for (const i of idxs) { const m = parts()[i]; if (m) { model.remove(m); m.geometry.dispose(); } }
   selIndex = -1; selSet = []; updateSel();
 }
-// Duplicate the selected part (offset slightly so the copy is visible) and select it.
+// Duplicate the selected part (copy lands EXACTLY on the original — no offset — so you
+// can immediately rotate/mirror it about the origin into place) and select it.
 // Parametric parts copy their params; custom/frozen meshes copy their exact geometry.
 function duplicateSelected() {
   const m = parts()[selIndex]; if (!m) { msg('select a part to copy'); return; }
@@ -919,7 +920,7 @@ function duplicateSelected() {
   const mesh = addPart({
     kind: u.kind, params: u.params ? { ...u.params } : null,
     geometry: keepGeo ? new THREE.BufferGeometry().copy(m.geometry) : undefined,
-    pos: [m.position.x + 1, m.position.y, m.position.z + 1],
+    pos: [m.position.x, m.position.y, m.position.z],
     rot: [m.rotation.x, m.rotation.y, m.rotation.z], scale: m.scale.toArray(),
     mat: JSON.parse(JSON.stringify(u.mat)), parametric: u.parametric,
     fallAt: u.fallAt, dmgStyle: u.dmgStyle,
