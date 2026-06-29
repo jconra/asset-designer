@@ -106,6 +106,8 @@
     .tool-kids button[data-axis],
     .tool-kids button[data-dmgstyle],
     .tool-kids button[data-cuts],
+    .tool-kids button[data-quadflip],
+    .tool-kids button[data-spiny],
     .subtool-kids .opt {
       width: 104px; text-align: center; background: rgba(5,16,11,0.92); border: 1px solid #1d4030;
       color: #7fc79c; font-family: inherit; font-size: 11px; font-weight: bold; letter-spacing: 0.14em;
@@ -302,7 +304,7 @@
     </div>
     <div class="tool" data-tool="rotate">
       <button class="tool-btn">⟳ ROTATE</button>
-      <div class="tool-kids"><button data-axis="x">X</button><button data-axis="y">Y</button><button data-axis="z">Z</button><button data-quadflip title="flip a selected quad's diagonal (FACE mode, 2 faces)">⤬ FLIP</button></div>
+      <div class="tool-kids"><button data-axis="x">X</button><button data-axis="y">Y</button><button data-axis="z">Z</button><button data-spiny title="rotate the selected part 90° around the origin's Y axis">⟲ ORG Y</button><button data-quadflip title="flip a selected quad's diagonal (FACE mode, 2 faces)">⤬ FLIP</button></div>
     </div>
     <div class="tool" data-tool="extrude">
       <button class="tool-btn">↑ EXTRUDE</button>
@@ -326,9 +328,6 @@
     </div>
     <div class="tool" data-tool="dupe">
       <button class="tool-btn" title="Ctrl+D">⧉ DUPE</button>
-    </div>
-    <div class="tool" data-tool="spinY">
-      <button class="tool-btn" title="rotate the whole asset 90° around the origin's Y axis">⟲ ROT Y</button>
     </div>
     <div class="tool" data-tool="delete">
       <button class="tool-btn">✕ DELETE</button>
@@ -368,6 +367,6 @@
     }
   }
   </script>
-  <script type="module" src="js/main.js?v=31"></script>
+  <script type="module" src="js/main.js?v=32"></script>
 </body>
 </html>

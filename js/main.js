@@ -63,9 +63,10 @@ function updateMultiSel() {
 // that axis and drives the active MOVE/SCALE/ROTATE tool as you drag along it — an
 // alternative to the axis buttons. Drawn over everything at a constant screen size.
 const GIZMO_AXES = { x: 0xff5555, y: 0x55ff77, z: 0x5599ff };
-function makeArrow(axis, color) {
+const gizmoMat = color => new THREE.MeshBasicMaterial({ color, depthTest: false, transparent: true });
+// Straight arrow handle (shown for MOVE / SCALE).
+function makeArrow(axis, mat) {
   const g = new THREE.Group();
-  const mat = new THREE.MeshBasicMaterial({ color, depthTest: false, transparent: true });
   const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.045, 1, 8), mat); shaft.position.y = 0.5;
   const head = new THREE.Mesh(new THREE.ConeGeometry(0.13, 0.32, 12), mat); head.position.y = 1.05;
   g.add(shaft, head);
@@ -73,8 +74,20 @@ function makeArrow(axis, color) {
   g.traverse(o => { o.userData.axis = axis; o.renderOrder = 1001; });
   return g;
 }
+// Curved ring handle (shown for ROTATE) — lies in the plane the axis spins IN
+// (perpendicular to the axis), so it reads as "turn around this axis".
+function makeArc(axis, mat) {
+  const arc = new THREE.Mesh(new THREE.TorusGeometry(0.85, 0.05, 8, 28, Math.PI * 0.7), mat);
+  if (axis === 'x') arc.rotation.y = Math.PI / 2;        // ring around X (YZ plane)
+  else if (axis === 'y') arc.rotation.x = Math.PI / 2;   // ring around Y (XZ plane); Z uses the default XY plane
+  arc.userData.axis = axis; arc.renderOrder = 1001;
+  return arc;
+}
 const gizmo = new THREE.Group(); gizmo.visible = false; scene.add(gizmo);
-const gizmoArrows = Object.entries(GIZMO_AXES).map(([ax, c]) => { const a = makeArrow(ax, c); gizmo.add(a); return a; });
+const gizmoSets = Object.entries(GIZMO_AXES).map(([ax, c]) => {
+  const mat = gizmoMat(c), arrow = makeArrow(ax, mat), arc = makeArc(ax, mat);
+  gizmo.add(arrow, arc); return { axis: ax, arrow, arc };
+});
 const gizmoSelActive = () => elemMode() ? hasSel() : (selSet.length > 0 || selIndex >= 0);
 const gizmoActive = () => !thumb && (toolMode === 'move' || toolMode === 'scale' || toolMode === 'rotate') && gizmoSelActive();
 // World position the gizmo sits at: object-mode = centre of the selected parts;
@@ -96,6 +109,8 @@ function updateGizmo() {
   const o = gizmoOrigin(); if (!o) { gizmo.visible = false; return; }
   gizmo.visible = true; gizmo.position.copy(o);
   gizmo.scale.setScalar(Math.max(1.5, camRadius * 0.11));   // constant on-screen size
+  const rot = toolMode === 'rotate';   // ROTATE → curved ring handles; MOVE/SCALE → arrows
+  for (const s of gizmoSets) { s.arrow.visible = !rot; s.arc.visible = rot; }
 }
 // A world axis at the gizmo origin → a normalised SCREEN direction (y DOWN, matching
 // pointer deltas), so a drag along the arrow maps to motion along that axis.
@@ -111,7 +126,8 @@ function raycastGizmo(px, py) {
   const r = renderer.domElement.getBoundingClientRect();
   const ndc = new THREE.Vector2(((px - r.left) / r.width) * 2 - 1, -((py - r.top) / r.height) * 2 + 1);
   raycaster.setFromCamera(ndc, camera);
-  const hit = raycaster.intersectObjects(gizmoArrows, true)[0];
+  const handles = gizmoSets.map(s => (toolMode === 'rotate' ? s.arc : s.arrow));   // only the visible set
+  const hit = raycaster.intersectObjects(handles, true)[0];
   return hit ? hit.object.userData.axis : null;
 }
 function highlightAxisButton(axis) {
@@ -843,16 +859,17 @@ function duplicateSelected() {
   selIndex = parts().indexOf(mesh); selSet = [selIndex]; updateSel(); scheduleSave();
   msg('duplicated part');
 }
-// Turn the WHOLE asset around the world origin's Y axis (a fixed 90° step). Bakes the
-// turn into every part's transform — orbits its position about origin + spins its
+// Turn the SELECTED part(s) around the world origin's Y axis (a fixed 90° step). Bakes
+// the turn into each part's transform — orbits its position about origin + spins its
 // orientation — so it exports/round-trips (vs. just rotating the display group).
-function rotateModelY(angle = Math.PI / 2) {
-  if (!parts().length) return;
+function rotateSelY(angle = Math.PI / 2) {
+  const targets = (selSet.length ? selSet : (selIndex >= 0 ? [selIndex] : [])).map(i => parts()[i]).filter(Boolean);
+  if (!targets.length) { msg('select a part to rotate'); return; }
   const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), angle);
-  for (const m of parts()) { m.position.applyQuaternion(q); m.quaternion.premultiply(q); }
+  for (const m of targets) { m.position.applyQuaternion(q); m.quaternion.premultiply(q); }
   const sel = parts()[selIndex]; if (sel) selBox.box.setFromObject(sel);
-  refreshStats(); refreshCoords(); updateGizmo(); scheduleSave();
-  msg('rotated 90° around origin Y');
+  updateMultiSel(); refreshStats(); refreshCoords(); updateGizmo(); scheduleSave();
+  msg('rotated part 90° around origin Y');
 }
 function setColor(hex) {
   const m = parts()[selIndex]; if (!m) return;
@@ -1377,7 +1394,6 @@ document.querySelectorAll('.tool > .tool-btn').forEach(btn => {
     const t = tool.dataset.tool;
     if (t === 'delete') { deleteSelected(); return; }
     if (t === 'dupe') { duplicateSelected(); return; }     // immediate action, no flyout
-    if (t === 'spinY') { rotateModelY(); return; }         // immediate action, no flyout
     if (t === 'extrude') { extrudeSelection(); return; }   // immediate action, no flyout
     const opening = !tool.classList.contains('active');
     document.querySelectorAll('.tool').forEach(x => x.classList.remove('active'));
@@ -1399,6 +1415,7 @@ document.querySelectorAll('.tool-kids button[data-axis]').forEach(b => b.addEven
   toolAxis = b.dataset.axis; updateHint();
 }));
 document.querySelectorAll('.tool-kids button[data-quadflip]').forEach(b => b.addEventListener('click', flipQuad));
+document.querySelectorAll('.tool-kids button[data-spiny]').forEach(b => b.addEventListener('click', () => rotateSelY()));
 // element-selection mode toolbar (Blender-style: OBJECT / VERTEX / EDGE / FACE)
 document.querySelectorAll('.selmode-btn').forEach(b => b.addEventListener('click', () => setSelMode(b.dataset.selmode)));
 // selection-op toolbar (left): NORMAL / ADD / SUBTRACT modes + a SELECT-ALL action
@@ -1561,7 +1578,7 @@ window.AD = {
   setSnap: (s) => { snap = s; },
   undo, redo, undoDepth: () => undoStack.length, redoDepth: () => redoStack.length,
   gizmoVisible: () => gizmo.visible, gizmoOrigin: () => { const o = gizmoOrigin(); return o ? o.toArray() : null; },
-  duplicate: duplicateSelected, recordHistory, rotateModelY,
+  duplicate: duplicateSelected, recordHistory, rotateSelY,
   setMeta: (k, v) => { meta[k] = v; refreshStats(); },
   exportConfig, importConfig,
   measureAll: () => ASSETS.map(a => {
