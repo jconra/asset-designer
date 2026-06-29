@@ -377,8 +377,18 @@ function raycastSelect(px, py, additive = false) {
   raycaster.setFromCamera(ndc, camera);
   const hit = raycaster.intersectObjects(parts(), false)[0];
   const idx = hit ? parts().indexOf(hit.object) : -1;
-  if (additive && !elemMode()) {
-    if (idx >= 0) { const at = selSet.indexOf(idx); if (at >= 0) selSet.splice(at, 1); else selSet.push(idx); }
+  if (!elemMode()) {
+    // SHIFT toggles; otherwise the selection-op toolbar decides (ADD unions, SUBTRACT
+    // removes, NORMAL replaces) — same as element picking, now for whole parts too.
+    if (additive) {
+      if (idx >= 0) { const at = selSet.indexOf(idx); if (at >= 0) selSet.splice(at, 1); else selSet.push(idx); }
+    } else if (selOp === 'add') {
+      if (idx >= 0 && !selSet.includes(idx)) selSet.push(idx);
+    } else if (selOp === 'subtract') {
+      if (idx >= 0) { const at = selSet.indexOf(idx); if (at >= 0) selSet.splice(at, 1); }
+    } else {
+      selSet = idx >= 0 ? [idx] : [];
+    }
     selIndex = selSet.length ? selSet[selSet.length - 1] : -1;
   } else {
     selIndex = idx; selSet = idx >= 0 ? [idx] : [];
@@ -406,6 +416,8 @@ const transformActive = () => !elemMode() && (toolMode === 'move' || toolMode ==
 // Snap increment (0 = off): quantises drag-adjustments + typed values to a grid.
 let snap = 0;
 function snapVal(v) { return snap > 0 ? +(Math.round(v / snap) * snap).toFixed(4) : v; }
+const _ROT_AXES = { x: new THREE.Vector3(1, 0, 0), y: new THREE.Vector3(0, 1, 0), z: new THREE.Vector3(0, 0, 1) };
+const _rotQ = new THREE.Quaternion();
 function applyTransform(dx) {
   // act on the whole multi-selection (each part transforms about its own origin)
   const targets = (selSet.length ? selSet : (selIndex >= 0 ? [selIndex] : [])).map(i => parts()[i]).filter(Boolean);
@@ -417,7 +429,14 @@ function applyTransform(dx) {
       for (const ax of (toolAxis === 'all' ? ['x', 'y', 'z'] : [toolAxis]))
         m.scale[ax] = Math.max(0.05, snapVal(m.scale[ax] + dx * 0.012));
     }
-    else if (toolMode === 'rotate') m.rotation[toolAxis] = snapVal(m.rotation[toolAxis] * 180 / Math.PI + dx * 1.2) * Math.PI / 180;   // snap in degrees
+    else if (toolMode === 'rotate') {
+      // Rotate about the WORLD axis via quaternion (matches the gizmo rings). Setting
+      // Euler rotation.x/y/z instead GIMBAL-LOCKS — at yaw 90° the X and Z axes coincide,
+      // so dragging X and Z do the same thing. Quaternion accumulation has no such pole.
+      let deg = dx * 1.2;
+      if (snap > 0) deg = Math.round(deg / snap) * snap;   // step by the snap increment (degrees)
+      if (deg) m.quaternion.premultiply(_rotQ.setFromAxisAngle(_ROT_AXES[toolAxis], deg * Math.PI / 180));
+    }
   }
   const pm = parts()[selIndex]; if (pm) selBox.box.setFromObject(pm);
   updateMultiSel();
@@ -530,7 +549,13 @@ function distToSeg(p, a, b) {
 }
 // SELECT ALL: every vertex / unique edge / unique face triangle of the current mesh.
 function selectAllElements() {
-  const m = parts()[selIndex]; if (!m || !elemMode()) return;
+  if (!elemMode()) {   // OBJECT mode → select every part
+    selSet = parts().map((_, i) => i);
+    selIndex = selSet.length ? selSet.length - 1 : -1;
+    updateSel();
+    return;
+  }
+  const m = parts()[selIndex]; if (!m) return;
   buildVertHandles();
   if (selMode === 'vertex') { selElems = vertGroups.map((_, k) => [k]); }
   else {
@@ -785,9 +810,8 @@ function flipQuad() {
 function setSelMode(mode) {
   selMode = mode;
   document.querySelectorAll('.selmode-btn').forEach(b => b.classList.toggle('active', b.dataset.selmode === mode));
-  // the selection-op toolbar is meaningless in OBJECT mode — hide it (also keeps it
-  // off the asset list, which shares the left edge).
-  document.getElementById('w-selop').style.display = elemMode() ? '' : 'none';
+  // the selection-op toolbar stays visible in EVERY mode — NORMAL/ADD/SUBTRACT/ALL drive
+  // object multi-select too (not just element picks), so there's no reason to hide it.
   selElems = [];   // switching element type drops the (now-incompatible) selection
   if (mode === 'object') clearVertHandles();
   else { selSet = selIndex >= 0 ? [selIndex] : []; buildVertHandles(); updateElemHilite(); }   // element edits are single-part
@@ -1592,6 +1616,7 @@ window.AD = {
   setSnap: (s) => { snap = s; },
   undo, redo, undoDepth: () => undoStack.length, redoDepth: () => redoStack.length,
   gizmoVisible: () => gizmo.visible, gizmoOrigin: () => { const o = gizmoOrigin(); return o ? o.toArray() : null; },
+  partDir: (i = selIndex) => { const m = parts()[i]; return m ? new THREE.Vector3(0, 0, 1).applyQuaternion(m.quaternion).toArray().map(v => +v.toFixed(3)) : null; },
   duplicate: duplicateSelected, recordHistory, rotateSelY,
   setMeta: (k, v) => { meta[k] = v; refreshStats(); },
   exportConfig, importConfig,

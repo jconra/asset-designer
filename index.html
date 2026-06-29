@@ -52,6 +52,13 @@
     .selmode-btn:hover, .selop-btn:hover, .selact-btn:hover { border-color: #5dff9f; }
     .selmode-btn.active, .selop-btn.active { border-color: #5dff9f; background: rgba(93,255,159,0.14); }
     .selact-btn { margin-top: 6px; border-style: dashed; }   /* an action, not a toggle */
+    /* undo/redo — square buttons under the selection tools (gap above the first) */
+    .editop-btn { width: 34px; height: 34px; padding: 0; background: rgba(5,16,11,0.92); border: 1px solid #1d4030;
+      color: #9fd9b6; font-size: 19px; line-height: 1; cursor: pointer; outline: none;
+      display: flex; align-items: center; justify-content: center; }
+    #btn-undo { margin-top: 14px; }
+    .editop-btn:hover:not(:disabled) { border-color: #5dff9f; color: #5dff9f; }
+    .editop-btn:disabled { opacity: 0.32; cursor: default; }
     .selmode-btn svg, .selop-btn svg, .selact-btn svg { display: block; width: 100%; height: 100%; }
     .ic { stroke: #7fc79c; fill: none; stroke-width: 1.6; }
     .icf { fill: #7fc79c; stroke: none; }
@@ -202,8 +209,6 @@
         <div class="ehint">edits autosave locally · RESET reverts to the original</div>
         <textarea id="export-text" spellcheck="false" placeholder="asset JSON — Export to fill, or paste + Import"></textarea>
         <div class="ebtns">
-          <button id="btn-undo" disabled title="Ctrl+Z">↶ UNDO</button>
-          <button id="btn-redo" disabled title="Ctrl+Shift+Z">↷ REDO</button>
           <button id="btn-export">EXPORT</button>
           <button id="btn-import">IMPORT</button>
           <button id="btn-save">SAVE</button>
@@ -234,10 +239,13 @@
       <svg viewBox="0 0 24 24"><rect class="ic" x="5" y="5" width="14" height="14" rx="1"/>
         <path class="ic" d="M9 12 H15" stroke-width="2.2"/></svg>
     </button>
-    <button class="selact-btn" data-selact="all" title="SELECT ALL elements of this mesh">
+    <button class="selact-btn" data-selact="all" title="SELECT ALL (all parts, or all elements of the mesh)">
       <svg viewBox="0 0 24 24"><rect class="icf" x="5" y="5" width="6" height="6"/><rect class="icf" x="13" y="5" width="6" height="6"/>
         <rect class="icf" x="5" y="13" width="6" height="6"/><rect class="icf" x="13" y="13" width="6" height="6"/></svg>
     </button>
+    <!-- undo/redo live here (under the selection tools, gap above) for easy reach -->
+    <button class="editop-btn" id="btn-undo" disabled title="Undo (Ctrl+Z)">↶</button>
+    <button class="editop-btn" id="btn-redo" disabled title="Redo (Ctrl+Shift+Z)">↷</button>
   </div>
 
   <!-- RIGHT EDGE (~25% down): element-selection mode, Blender-style.
@@ -367,6 +375,6 @@
     }
   }
   </script>
-  <script type="module" src="js/main.js?v=33"></script>
+  <script type="module" src="js/main.js?v=35"></script>
 </body>
 </html>
