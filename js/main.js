@@ -63,7 +63,11 @@ function updateMultiSel() {
 // that axis and drives the active MOVE/SCALE/ROTATE tool as you drag along it — an
 // alternative to the axis buttons. Drawn over everything at a constant screen size.
 const GIZMO_AXES = { x: 0xff5555, y: 0x55ff77, z: 0x5599ff };
+// arrows/scale draw ON TOP of everything (depthTest off) — they read fine that way.
 const gizmoMat = color => new THREE.MeshBasicMaterial({ color, depthTest: false, transparent: true });
+// the rotation RINGS instead depth-test against the scene, so the part HIDES their back
+// half (they go behind the object, Blender-style) instead of floating flat over it.
+const gizmoArcMat = color => new THREE.MeshBasicMaterial({ color, depthTest: true, depthWrite: false, transparent: true });
 // Straight arrow handle (shown for MOVE / SCALE).
 function makeArrow(axis, mat) {
   const g = new THREE.Group();
@@ -99,7 +103,8 @@ function makeScaleHandle(axis, mat) {
 }
 const gizmo = new THREE.Group(); gizmo.visible = false; scene.add(gizmo);
 const gizmoSets = Object.entries(GIZMO_AXES).map(([ax, c]) => {
-  const mat = gizmoMat(c), arrow = makeArrow(ax, mat), scale = makeScaleHandle(ax, mat), arc = makeArc(ax, mat);
+  const mat = gizmoMat(c);   // arrows + scale share the always-on-top material
+  const arrow = makeArrow(ax, mat), scale = makeScaleHandle(ax, mat), arc = makeArc(ax, gizmoArcMat(c));
   gizmo.add(arrow, scale, arc); return { axis: ax, arrow, scale, arc };
 });
 const gizmoSelActive = () => elemMode() ? hasSel() : (selSet.length > 0 || selIndex >= 0);
@@ -118,11 +123,23 @@ function gizmoOrigin() {
   for (const i of idxs) { const m = parts()[i]; if (m) box.expandByObject(m); }
   return box.isEmpty() ? null : box.getCenter(new THREE.Vector3());
 }
+// World bounding-sphere radius of the current selection (the whole part in element mode)
+// — used to size the rotation rings so they ENCIRCLE the object.
+function selectionRadius() {
+  const idxs = elemMode() ? (selIndex >= 0 ? [selIndex] : []) : (selSet.length ? selSet : (selIndex >= 0 ? [selIndex] : []));
+  const box = new THREE.Box3();
+  for (const i of idxs) { const m = parts()[i]; if (m) box.expandByObject(m); }
+  if (box.isEmpty()) return 1;
+  return box.getBoundingSphere(new THREE.Sphere()).radius || 1;
+}
 function updateGizmo() {
   if (!gizmoActive()) { gizmo.visible = false; return; }
   const o = gizmoOrigin(); if (!o) { gizmo.visible = false; return; }
   gizmo.visible = true; gizmo.position.copy(o);
-  gizmo.scale.setScalar(Math.max(1.5, camRadius * 0.11));   // constant on-screen size
+  // MOVE/SCALE: constant on-screen size. ROTATE: grow to encircle the object so the rings
+  // wrap AROUND it (the back arc passes behind and is hidden by depth) — never buried inside.
+  const screenS = Math.max(1.5, camRadius * 0.11);
+  gizmo.scale.setScalar(toolMode === 'rotate' ? Math.max(screenS, selectionRadius() * 1.45) : screenS);
   // distinct handle per tool: MOVE → arrows, SCALE → box-tipped, ROTATE → rings
   for (const s of gizmoSets) { s.arrow.visible = toolMode === 'move'; s.scale.visible = toolMode === 'scale'; s.arc.visible = toolMode === 'rotate'; }
 }
