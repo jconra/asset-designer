@@ -9,7 +9,7 @@
 
 import * as THREE from 'three';
 import { ASSETS } from 'https://rmrfbase.com/js/assets.manifest.js?v=4';
-import { TEAM_COLORS } from 'https://rmrfbase.com/js/CamoTexture.js';
+import { TEAM_COLORS, getCamoTextures } from 'https://rmrfbase.com/js/CamoTexture.js';
 import { concreteTexture, ribbedMetalTexture, fabricTexture, crateTexture, roofTexture, accentPlateTexture, hazardTexture,
   noiseTexture, grimeTexture, rustTexture, scratchedTexture } from 'https://rmrfbase.com/js/Textures.js?v=3';
 
@@ -19,7 +19,18 @@ const TEX = {
   crate: () => crateTexture(), roof: () => roofTexture(), accent: () => accentPlateTexture(),
   hazard: () => hazardTexture(),
   noise: () => noiseTexture(), grime: () => grimeTexture(), rust: () => rustTexture(), scratched: () => scratchedTexture(),
+  camo: () => camoColorTex(),   // the vehicles' camo, in the current COLOR-menu team colour
 };
+// The camo colour map at the current accent (downscaled from the 512px source to keep
+// the baked data URL reasonable). Camo depends on the team colour + a random seed, so it
+// can't round-trip by kind id like the procedural textures — it bakes to base64 instead.
+function camoColorTex() {
+  const src = getCamoTextures(accentIndex).map.image;   // 512px camo canvas (cached per colour)
+  const c = document.createElement('canvas'); c.width = c.height = 256;
+  c.getContext('2d').drawImage(src, 0, 0, 256, 256);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
 
 const CELL = 5;
 const SLOP = 9;   // px a press may wander and still count as a tap (select)
@@ -956,7 +967,7 @@ function applyTexture(kind) {
     mat.map = tex; mat.color.set('#ffffff');     // white base so the texture reads true
     // remember the procedural KIND so export can reference it by id (no fat base64);
     // u.map keeps the data URL only as a fallback for round-tripping.
-    u.color = '#ffffff'; u.map = url; u.mapKind = kind; u.tile = u.tile || [1, 1];
+    u.color = '#ffffff'; u.map = url; u.mapKind = kind === 'camo' ? null : kind; u.tile = u.tile || [1, 1];
   }
   mat.needsUpdate = true; refreshMatParams(); syncMapButtons();
 }
@@ -968,7 +979,7 @@ function applyBumpTex(kind) {
   if (kind === 'none') { mat.bumpMap = null; u.bumpTex = null; u.bumpKind = null; }
   else {
     const { tex, url } = buildTex(kind, u.tile || [1, 1]);
-    mat.bumpMap = tex; mat.bumpScale = u.bumpScale ?? 0.4; u.bumpTex = url; u.bumpKind = kind; u.bumpScale = mat.bumpScale; u.tile = u.tile || [1, 1];
+    mat.bumpMap = tex; mat.bumpScale = u.bumpScale ?? 0.4; u.bumpTex = url; u.bumpKind = kind === 'camo' ? null : kind; u.bumpScale = mat.bumpScale; u.tile = u.tile || [1, 1];
   }
   mat.needsUpdate = true;
 }
@@ -980,7 +991,7 @@ function applySpecTex(kind) {
   if (kind === 'none') { mat.roughnessMap = null; u.specTex = null; u.specKind = null; }
   else {
     const { tex, url } = buildTex(kind, u.tile || [1, 1]);
-    mat.roughnessMap = tex; u.specTex = url; u.specKind = kind; u.tile = u.tile || [1, 1];
+    mat.roughnessMap = tex; u.specTex = url; u.specKind = kind === 'camo' ? null : kind; u.tile = u.tile || [1, 1];
   }
   mat.needsUpdate = true;
 }
