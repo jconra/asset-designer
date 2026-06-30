@@ -132,6 +132,11 @@ function gizmoOrigin() {
     return m.localToWorld(c.multiplyScalar(1 / groups.length));
   }
   const idxs = selSet.length ? selSet : (selIndex >= 0 ? [selIndex] : []);
+  if (idxs.length > 1) {   // multi-select GROUP: collective centre = mean of part origins (the rigid-rotate pivot)
+    const c = new THREE.Vector3(); let n = 0;
+    for (const i of idxs) { const m = parts()[i]; if (m) { c.add(m.position); n++; } }
+    return n ? c.multiplyScalar(1 / n) : null;
+  }
   const box = new THREE.Box3();
   for (const i of idxs) { const m = parts()[i]; if (m) box.expandByObject(m); }
   return box.isEmpty() ? null : box.getCenter(new THREE.Vector3());
@@ -500,24 +505,51 @@ let snap = 0;
 function snapVal(v) { return snap > 0 ? +(Math.round(v / snap) * snap).toFixed(4) : v; }
 const _ROT_AXES = { x: new THREE.Vector3(1, 0, 0), y: new THREE.Vector3(0, 1, 0), z: new THREE.Vector3(0, 0, 1) };
 const _rotQ = new THREE.Quaternion();
+const _unit = new THREE.Vector3();
+// For a (possibly rotated) part, the LOCAL scale axis whose world direction points most
+// along the grabbed WORLD axis — so a world-aligned scale handle stretches along that
+// world axis (exact for 90° rotations; nearest-axis otherwise).
+function localScaleAxis(m, worldAxisKey) {
+  const w = _ROT_AXES[worldAxisKey];
+  let best = 'x', bestDot = -1;
+  for (const k of ['x', 'y', 'z']) {
+    const d = Math.abs(_unit.copy(_ROT_AXES[k]).applyQuaternion(m.quaternion).dot(w));
+    if (d > bestDot) { bestDot = d; best = k; }
+  }
+  return best;
+}
 function applyTransform(dx) {
-  // act on the whole multi-selection (each part transforms about its own origin)
   const targets = (selSet.length ? selSet : (selIndex >= 0 ? [selIndex] : [])).map(i => parts()[i]).filter(Boolean);
   if (!targets.length) return;
+  // ROTATE about the WORLD axis via quaternion (matches the gizmo rings; Euler would
+  // gimbal-lock at yaw 90°). For a MULTI-part selection the whole group rotates as ONE
+  // rigid body around its collective centre (mean of origins — invariant under the
+  // rotation, so it doesn't drift); a single part still spins about its own origin.
+  let rotQ = null, pivot = null;
+  if (toolMode === 'rotate') {
+    let deg = dx * 1.2;
+    if (snap > 0) deg = Math.round(deg / snap) * snap;   // step by the snap increment (degrees)
+    if (deg) {
+      rotQ = _rotQ.setFromAxisAngle(_ROT_AXES[toolAxis], deg * Math.PI / 180);
+      if (targets.length > 1) {
+        pivot = new THREE.Vector3();
+        for (const m of targets) pivot.add(m.position);
+        pivot.multiplyScalar(1 / targets.length);
+      }
+    }
+  }
   for (const m of targets) {
     if (toolMode === 'move') m.position[toolAxis] = snapVal(m.position[toolAxis] + dx * 0.04);
     else if (toolMode === 'scale') {
-      // ALL = uniform scale (grow/shrink the whole part); otherwise one axis.
-      for (const ax of (toolAxis === 'all' ? ['x', 'y', 'z'] : [toolAxis]))
-        m.scale[ax] = Math.max(0.05, snapVal(m.scale[ax] + dx * 0.012));
+      // ALL = uniform scale (rotation-independent). One axis = grow the LOCAL axis aligned
+      // with the grabbed WORLD axis, so scaling stays aligned to the world even when the
+      // part is rotated (e.g. boards turned 90° to build a crate).
+      const axes = toolAxis === 'all' ? ['x', 'y', 'z'] : [localScaleAxis(m, toolAxis)];
+      for (const ax of axes) m.scale[ax] = Math.max(0.05, snapVal(m.scale[ax] + dx * 0.012));
     }
-    else if (toolMode === 'rotate') {
-      // Rotate about the WORLD axis via quaternion (matches the gizmo rings). Setting
-      // Euler rotation.x/y/z instead GIMBAL-LOCKS — at yaw 90° the X and Z axes coincide,
-      // so dragging X and Z do the same thing. Quaternion accumulation has no such pole.
-      let deg = dx * 1.2;
-      if (snap > 0) deg = Math.round(deg / snap) * snap;   // step by the snap increment (degrees)
-      if (deg) m.quaternion.premultiply(_rotQ.setFromAxisAngle(_ROT_AXES[toolAxis], deg * Math.PI / 180));
+    else if (rotQ) {
+      m.quaternion.premultiply(rotQ);                       // orientation
+      if (pivot) m.position.sub(pivot).applyQuaternion(rotQ).add(pivot);   // swing position around the group centre
     }
   }
   const pm = parts()[selIndex]; if (pm) selBox.box.setFromObject(pm);
