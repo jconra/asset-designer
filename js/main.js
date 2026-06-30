@@ -234,18 +234,35 @@ function texFromURL(url, tile) {
   return t;
 }
 function applyMapURL(mat, url, tile) { if (url) { mat.map = texFromURL(url, tile); mat.needsUpdate = true; } }
-// Build a fresh procedural texture (TEX[kind]) at the part's tiling; returns {tex,url}.
-function buildTex(kind, tile) {
-  const tex = TEX[kind](); let url = null; try { url = tex.image.toDataURL(); } catch (e) { /* tainted */ }
-  tex.userData = { src: url }; tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+// Rotate a canvas by a multiple of 90° (lossless; keeps tiling). The rotation is BAKED
+// into the pixels rather than set on tex.rotation, so a derived normal map stays correct
+// (its encoded vectors rotate with the relief — a plain UV spin would not).
+function rotateCanvas(src, deg) {
+  deg = ((deg % 360) + 360) % 360;
+  if (!deg) return src;
+  const swap = deg === 90 || deg === 270;
+  const cv = document.createElement('canvas');
+  cv.width = swap ? src.height : src.width; cv.height = swap ? src.width : src.height;
+  const ctx = cv.getContext('2d');
+  ctx.translate(cv.width / 2, cv.height / 2); ctx.rotate(deg * Math.PI / 180);
+  ctx.drawImage(src, -src.width / 2, -src.height / 2);
+  return cv;
+}
+// Build a fresh procedural texture (TEX[kind]) at the part's tiling + rotation; returns {tex,url}.
+function buildTex(kind, tile, rot = 0) {
+  const src = TEX[kind](), cv = rotateCanvas(src.image, rot);
+  const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace;
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping; tex.anisotropy = 4;
+  let url = null; try { url = cv.toDataURL(); } catch (e) { /* tainted */ }
+  tex.userData = { src: url, kind: (src.userData && src.userData.kind) || kind };
   if (tile) tex.repeat.set(tile[0], tile[1]);
   return { tex, url };
 }
 // Build a NORMAL map from a kind's procedural texture (its luminance = height). Kept
 // self-contained (not imported from Textures.js) so the designer stays decoupled, but it
 // mirrors the game's toNormalTexture exactly so the designer is WYSIWYG. Data, not colour.
-function buildNormalTex(kind, tile) {
-  const src = TEX[kind](), img = src.image, s = img.width;
+function buildNormalTex(kind, tile, rot = 0) {
+  const src = TEX[kind](), img = rotateCanvas(src.image, rot), s = img.width;   // rotate HEIGHT first → correct vectors
   const sd = img.getContext('2d').getImageData(0, 0, s, s).data;
   const cv = document.createElement('canvas'); cv.width = cv.height = s;
   const ctx = cv.getContext('2d'), out = ctx.createImageData(s, s);
@@ -278,7 +295,7 @@ function matInfo(m) {
     map: texToURL(m.map), mapKind: texKind(m.map),
     // normal + spec are now INDEPENDENT map slots (their own texture, no colour map needed);
     // one shared tiling drives whichever maps are present.
-    tile: anyMap ? [anyMap.repeat.x, anyMap.repeat.y] : null,
+    tile: anyMap ? [anyMap.repeat.x, anyMap.repeat.y] : null, rot: 0,   // rotation is baked into the canvas; u.rot is the source of truth
     normalTex: texToURL(m.normalMap), normalKind: texKind(m.normalMap), normalScale: m.normalScale ? m.normalScale.x : 1,
     specTex: texToURL(m.roughnessMap), specKind: texKind(m.roughnessMap),
   };
@@ -286,7 +303,7 @@ function matInfo(m) {
 // Canonical material defaults (mirror addMesh's new-part material). The minimal
 // export OMITS any field equal to these; makeMat fills them back in on load, so a
 // stripped material round-trips exactly.
-const MAT_DEF = { kind: 'standard', color: '#b0b6bb', roughness: 0.8, metalness: 0.1, flatShading: true, emissive: null, emissiveIntensity: 0, opacity: 1, transparent: false, normalScale: 1 };
+const MAT_DEF = { kind: 'standard', color: '#b0b6bb', roughness: 0.8, metalness: 0.1, flatShading: true, emissive: null, emissiveIntensity: 0, opacity: 1, transparent: false, normalScale: 1, rot: 0 };
 function makeMat(info) {
   info = { ...MAT_DEF, ...(info || {}) };
   const base = { color: info.color, transparent: info.transparent, opacity: info.opacity, side: THREE.DoubleSide };
@@ -298,12 +315,13 @@ function makeMat(info) {
   }
   const tile = info.tile;
   // Prefer a procedural KIND id (rebuilt fresh, no base64); fall back to a stored data URL.
-  if (info.mapKind && TEX[info.mapKind]) mat.map = buildTex(info.mapKind, tile || [1, 1]).tex;
+  const rot = info.rot || 0;
+  if (info.mapKind && TEX[info.mapKind]) mat.map = buildTex(info.mapKind, tile || [1, 1], rot).tex;
   else if (info.map) applyMapURL(mat, info.map, tile);
-  if (info.normalKind && TEX[info.normalKind]) { mat.normalMap = buildNormalTex(info.normalKind, tile || [1, 1]).tex; const ns = info.normalScale ?? 1; mat.normalScale.set(ns, ns); }
+  if (info.normalKind && TEX[info.normalKind]) { mat.normalMap = buildNormalTex(info.normalKind, tile || [1, 1], rot).tex; const ns = info.normalScale ?? 1; mat.normalScale.set(ns, ns); }
   else if (info.normalTex) { const t = texFromURL(info.normalTex, tile); t.colorSpace = THREE.NoColorSpace; mat.normalMap = t; const ns = info.normalScale ?? 1; mat.normalScale.set(ns, ns); }
   if (mat.isMeshStandardMaterial) {
-    if (info.specKind && TEX[info.specKind]) mat.roughnessMap = buildTex(info.specKind, tile || [1, 1]).tex;
+    if (info.specKind && TEX[info.specKind]) mat.roughnessMap = buildTex(info.specKind, tile || [1, 1], rot).tex;
     else if (info.specTex) mat.roughnessMap = texFromURL(info.specTex, tile);
     else if (info.spec && mat.map) mat.roughnessMap = mat.map;   // legacy
   }
@@ -945,13 +963,12 @@ function deleteSelected() {
   for (const i of idxs) { const m = parts()[i]; if (m) { model.remove(m); m.geometry.dispose(); } }
   selIndex = -1; selSet = []; updateSel();
 }
-// Duplicate the selected part (copy lands EXACTLY on the original — no offset — so you
-// can immediately rotate/mirror it about the origin into place) and select it.
-// Parametric parts copy their params; custom/frozen meshes copy their exact geometry.
-function duplicateSelected() {
-  const m = parts()[selIndex]; if (!m) { msg('select a part to copy'); return; }
+// Copy ONE part (copy lands EXACTLY on the original — no offset — so you can immediately
+// rotate/mirror it about the origin into place). Parametric parts copy their params;
+// custom/frozen meshes copy their exact geometry. Returns the new mesh.
+function duplicateOne(m) {
   const u = m.userData, keepGeo = u.kind === 'frozen' || !u.parametric;
-  const mesh = addPart({
+  return addPart({
     kind: u.kind, params: u.params ? { ...u.params } : null,
     geometry: keepGeo ? new THREE.BufferGeometry().copy(m.geometry) : undefined,
     pos: [m.position.x, m.position.y, m.position.z],
@@ -959,8 +976,18 @@ function duplicateSelected() {
     mat: JSON.parse(JSON.stringify(u.mat)), parametric: u.parametric,
     fallAt: u.fallAt, dmgStyle: u.dmgStyle,
   });
-  selIndex = parts().indexOf(mesh); selSet = [selIndex]; updateSel(); scheduleSave();
-  msg('duplicated part');
+}
+// Duplicate EVERY selected part and select the new copies as a group, so a multi-select
+// dupe can be moved/rotated together right away.
+function duplicateSelected() {
+  const idxs = selSet.length ? selSet.slice() : (selIndex >= 0 ? [selIndex] : []);
+  const sources = idxs.map(i => parts()[i]).filter(Boolean);
+  if (!sources.length) { msg('select a part to copy'); return; }
+  const copies = sources.map(duplicateOne);
+  selSet = copies.map(mesh => parts().indexOf(mesh)).filter(i => i >= 0);
+  selIndex = selSet.length ? selSet[selSet.length - 1] : -1;
+  updateSel(); scheduleSave();
+  msg(copies.length > 1 ? `duplicated ${copies.length} parts` : 'duplicated part');
 }
 // Turn the SELECTED part(s) around the world origin's Y axis (a fixed 90° step). Bakes
 // the turn into each part's transform — orbits its position about origin + spins its
@@ -998,7 +1025,7 @@ function applyTexture(kind) {
   const mat = m.material, u = m.userData.mat;
   if (kind === 'none') { mat.map = null; u.map = null; u.mapKind = null; }
   else {
-    const { tex, url } = buildTex(kind, u.tile || [1, 1]);
+    const { tex, url } = buildTex(kind, u.tile || [1, 1], u.rot || 0);
     mat.map = tex; mat.color.set('#ffffff');     // white base so the texture reads true
     // remember the procedural KIND so export can reference it by id (no fat base64);
     // u.map keeps the data URL only as a fallback for round-tripping.
@@ -1014,7 +1041,7 @@ function applyNormalTex(kind) {
   if (!mat.isMeshStandardMaterial) return;   // normal maps need a lit material
   if (kind === 'none') { mat.normalMap = null; u.normalTex = null; u.normalKind = null; }
   else {
-    const { tex, url } = buildNormalTex(kind, u.tile || [1, 1]);
+    const { tex, url } = buildNormalTex(kind, u.tile || [1, 1], u.rot || 0);
     const ns = u.normalScale ?? 1; mat.normalMap = tex; mat.normalScale.set(ns, ns);
     u.normalTex = url; u.normalKind = kind === 'camo' ? null : kind; u.normalScale = ns; u.tile = u.tile || [1, 1];
   }
@@ -1027,7 +1054,7 @@ function applySpecTex(kind) {
   if (!mat.isMeshStandardMaterial) return;
   if (kind === 'none') { mat.roughnessMap = null; u.specTex = null; u.specKind = null; }
   else {
-    const { tex, url } = buildTex(kind, u.tile || [1, 1]);
+    const { tex, url } = buildTex(kind, u.tile || [1, 1], u.rot || 0);
     mat.roughnessMap = tex; u.specTex = url; u.specKind = kind === 'camo' ? null : kind; u.tile = u.tile || [1, 1];
   }
   mat.needsUpdate = true;
@@ -1044,6 +1071,17 @@ function setTile(axis, v) {
   for (const map of maps) { map.wrapS = map.wrapT = THREE.RepeatWrapping; if (axis === 'x') map.repeat.x = v; else map.repeat.y = v; map.needsUpdate = true; }
   m.userData.mat.tile = [maps[0].repeat.x, maps[0].repeat.y];
 }
+// Rotate every procedural map slot by a multiple of 90° (baked into the canvas, so a
+// derived normal map stays correct). e.g. flips the metal ribs from vertical to horizontal.
+function setRotation(deg) {
+  const m = parts()[selIndex]; if (!m) return;
+  const mat = m.material, u = m.userData.mat, rot = ((deg % 360) + 360) % 360; u.rot = rot;
+  const tile = u.tile || [1, 1];
+  if (u.mapKind) mat.map = buildTex(u.mapKind, tile, rot).tex;
+  if (u.normalKind && mat.isMeshStandardMaterial) { const ns = u.normalScale ?? 1; mat.normalMap = buildNormalTex(u.normalKind, tile, rot).tex; mat.normalScale.set(ns, ns); }
+  if (u.specKind && mat.isMeshStandardMaterial) mat.roughnessMap = buildTex(u.specKind, tile, rot).tex;
+  mat.needsUpdate = true;
+}
 // Top-stack panel under MATERIAL: the active sub-tool's map controls — TILING for the
 // slot it edits (colour / normal / spec), plus the NORMAL STRENGTH when that menu is open.
 function refreshMatParams() {
@@ -1057,12 +1095,14 @@ function refreshMatParams() {
   let html =
     `<span class="gmode">TILE</span>` +
     `<label>X</label><input id="mp-tx" type="number" step="0.5" min="0.1" value="${+tile[0].toFixed(2)}">` +
-    `<label>Y</label><input id="mp-ty" type="number" step="0.5" min="0.1" value="${+tile[1].toFixed(2)}">`;
+    `<label>Y</label><input id="mp-ty" type="number" step="0.5" min="0.1" value="${+tile[1].toFixed(2)}">` +
+    `<label style="margin-left:8px">ROT°</label><input id="mp-rot" type="number" step="90" value="${(u.rot ?? 0)}">`;
   if (matSub === 'normal') html += `<label style="margin-left:10px">STRENGTH</label><input id="mp-bs" type="number" step="0.1" min="0" value="${(u.normalScale ?? 1)}">`;
   wrap.innerHTML = html;
   syncTopBox();
   document.getElementById('mp-tx').addEventListener('change', e => { const v = parseFloat(e.target.value); if (v > 0) setTile('x', v); });
   document.getElementById('mp-ty').addEventListener('change', e => { const v = parseFloat(e.target.value); if (v > 0) setTile('y', v); });
+  const rt = document.getElementById('mp-rot'); if (rt) rt.addEventListener('change', e => { const v = parseFloat(e.target.value); if (!Number.isNaN(v)) { setRotation(v); refreshMatParams(); } });
   const bs = document.getElementById('mp-bs'); if (bs) bs.addEventListener('change', e => { const v = parseFloat(e.target.value); if (!Number.isNaN(v)) setNormalScale(v); });
 }
 
@@ -1188,6 +1228,7 @@ function minimalMat(u) {
   if ((u.normalKind || normalTex) && u.normalScale != null && u.normalScale !== 1) out.normalScale = u.normalScale;
   if (u.specKind) out.specKind = u.specKind; else if (specTex) out.specTex = specTex;
   if (hasMap && u.tile && (u.tile[0] !== 1 || u.tile[1] !== 1)) out.tile = u.tile;
+  if (hasMap && u.rot) out.rot = u.rot;
   return out;
 }
 function exportConfig() {
@@ -1523,6 +1564,8 @@ const _redoBtn = document.getElementById('btn-redo'); if (_redoBtn) _redoBtn.add
 // Keyboard: Ctrl/Cmd+Z = undo, Ctrl+Shift+Z / Ctrl+Y = redo (ignored while typing in a field).
 window.addEventListener('keydown', e => {
   const t = e.target; if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
+  // Delete / Backspace — remove the selected part(s), no modifier needed
+  if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); deleteSelected(); return; }
   if (!(e.ctrlKey || e.metaKey)) return;
   const k = e.key.toLowerCase();
   if (k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); }
@@ -1686,13 +1729,14 @@ window.AD = {
   shiftSelect: (i) => { const at = selSet.indexOf(i); if (at >= 0) selSet.splice(at, 1); else selSet.push(i); selIndex = selSet.length ? selSet[selSet.length - 1] : -1; updateSel(); },
   selObjCount: () => selSet.length,
   partCount: () => parts().length,
-  addMesh, deleteSelected, setColor, applyTexture, applyTeamColor,
+  addMesh, deleteSelected, duplicateSelected, setColor, applyTexture, applyTeamColor,
   setAccent: (i) => { accentIndex = i; applyAccent(TEAM_COLORS[i].hex); },
   partHasMap: (i) => !!(parts()[i] && parts()[i].material.map),
   partTeam: (i) => !!(parts()[i] && parts()[i].userData.mat && parts()[i].userData.mat.team),
   // texture-map hooks (headless): tiling, normal, spec + a readback
   matTile: (x, y) => { setTile('x', x); setTile('y', y); },
   matNormal: (kind, scale) => { applyNormalTex(kind); if (scale != null) setNormalScale(scale); },
+  matRot: (deg) => setRotation(deg),
   matSpec: (kind) => applySpecTex(kind),
   // damage-staging hooks (headless)
   damageMode: (on) => { if (dmgActive()) dmgRestore(); toolMode = on ? 'damage' : null; if (on) { dmgSnapshot(); dmgPreviewHP = 1; } },
