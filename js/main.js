@@ -241,6 +241,9 @@ function buildTex(kind, tile) {
   if (tile) tex.repeat.set(tile[0], tile[1]);
   return { tex, url };
 }
+// A procedural texture from Textures.js self-identifies via userData.kind — capture it
+// (when it's one of our TEX kinds) so the export ships the short id, not the fat data-URL.
+function texKind(tex) { const k = tex && tex.userData && tex.userData.kind; return k && TEX[k] ? k : null; }
 function matInfo(m) {
   const anyMap = m.map || m.bumpMap || m.roughnessMap;
   return {
@@ -249,14 +252,20 @@ function matInfo(m) {
     roughness: m.roughness ?? 1, metalness: m.metalness ?? 0, flatShading: !!m.flatShading,
     emissive: m.emissive ? '#' + m.emissive.getHexString() : null, emissiveIntensity: m.emissiveIntensity ?? 0,
     opacity: m.opacity ?? 1, transparent: !!m.transparent,
-    map: texToURL(m.map),
+    map: texToURL(m.map), mapKind: texKind(m.map),
     // bump + spec are now INDEPENDENT map slots (their own texture, no colour map needed);
     // one shared tiling drives whichever maps are present.
     tile: anyMap ? [anyMap.repeat.x, anyMap.repeat.y] : null,
-    bumpTex: texToURL(m.bumpMap), bumpScale: m.bumpScale ?? 0.4, specTex: texToURL(m.roughnessMap),
+    bumpTex: texToURL(m.bumpMap), bumpKind: texKind(m.bumpMap), bumpScale: m.bumpScale ?? 0.4,
+    specTex: texToURL(m.roughnessMap), specKind: texKind(m.roughnessMap),
   };
 }
+// Canonical material defaults (mirror addMesh's new-part material). The minimal
+// export OMITS any field equal to these; makeMat fills them back in on load, so a
+// stripped material round-trips exactly.
+const MAT_DEF = { kind: 'standard', color: '#b0b6bb', roughness: 0.8, metalness: 0.1, flatShading: true, emissive: null, emissiveIntensity: 0, opacity: 1, transparent: false, bumpScale: 0.4 };
 function makeMat(info) {
+  info = { ...MAT_DEF, ...(info || {}) };
   const base = { color: info.color, transparent: info.transparent, opacity: info.opacity, side: THREE.DoubleSide };
   let mat;
   if (info.kind === 'basic') mat = new THREE.MeshBasicMaterial(base);
@@ -323,12 +332,15 @@ function addPart({ kind, params, geometry, pos, rot, scale, mat, parametric, fal
   const geo = hasGeo
     ? (geometry instanceof THREE.BufferGeometry ? geometry : new THREE.BufferGeometryLoader().parse(geometry))
     : makeGeo(kind, params);
-  const mesh = new THREE.Mesh(geo, makeMat(mat));
-  if (pos) mesh.position.fromArray(pos);
-  if (rot) mesh.rotation.set(rot[0], rot[1], rot[2]);
-  if (scale) mesh.scale.fromArray(scale);
+  // A minimal export omits default mat fields and trims trailing 0/1 from the
+  // transform arrays — rebuild the full forms so editing + re-export stay exact.
+  const fullMat = { ...MAT_DEF, ...(mat || {}) };
+  const mesh = new THREE.Mesh(geo, makeMat(fullMat));
+  if (pos) mesh.position.set(pos[0] ?? 0, pos[1] ?? 0, pos[2] ?? 0);
+  if (rot) mesh.rotation.set(rot[0] ?? 0, rot[1] ?? 0, rot[2] ?? 0);
+  if (scale) mesh.scale.set(scale[0] ?? 1, scale[1] ?? 1, scale[2] ?? 1);
   mesh.userData = {
-    kind, params: params || null, mat, parametric: parametric !== undefined ? parametric : (!hasGeo && kind !== 'frozen'),
+    kind, params: params || null, mat: fullMat, parametric: parametric !== undefined ? parametric : (!hasGeo && kind !== 'frozen'),
     // DESTRUCTION STAGING: fallAt = HP fraction (0..1) at/below which this part lets go;
     // dmgStyle = how it goes ('tumble' = explode outward, 'squish' = pancake flat). 0 = only at death.
     fallAt: fallAt ?? 0, dmgStyle: dmgStyle || 'tumble',
@@ -1108,18 +1120,54 @@ function refreshDmgParams() {
 }
 
 // ── Export / import / save ───────────────────────────────────────────────────
-// Slim a material for export: when a map came from a procedural KIND, ship the id
-// (mapKind/bumpKind/specKind) and drop the fat base64 data URL — makeMat rebuilds it.
-// Baked textures (no kind) keep their data URL so they still round-trip exactly.
-function serializeMat(u) {
-  const m = { ...u };
-  if (m.mapKind) delete m.map;
-  if (m.bumpKind) delete m.bumpTex;
-  if (m.specKind) delete m.specTex;
-  return m;
+// MINIMAL export: ship only what differs from the load-time defaults. Every omitted
+// field is reconstructed by makeMat/addPart (which already default them), so it still
+// round-trips exactly — just far smaller.
+// Round each element to `dp` decimals, then drop trailing elements equal to `defv`
+// (pos/rot → 0, scale → 1). Returns the shortened array, or null if all-default.
+const trimTrail = (a, defv, dp = 3) => {
+  if (!a) return null;
+  const f = 10 ** dp;
+  const r = a.map(v => Number.isInteger(v) ? v : Math.round(v * f) / f);
+  let n = r.length;
+  while (n > 0 && r[n - 1] === defv) n--;
+  return n ? r.slice(0, n) : null;
+};
+// Recursively round every number to `dp` decimals (no crazy float precision in the file).
+function roundNums(o, dp = 3) {
+  const f = 10 ** dp;
+  const walk = v => {
+    if (typeof v === 'number') return Number.isInteger(v) ? v : Math.round(v * f) / f;
+    if (Array.isArray(v)) return v.map(walk);
+    if (v && typeof v === 'object') { const r = {}; for (const k in v) r[k] = walk(v[k]); return r; }
+    return v;
+  };
+  return walk(o);
+}
+// A material reduced to its non-default fields. Procedural KIND textures ship their id
+// (mapKind/…) and drop the fat data-URL; baked textures (no kind) keep their data-URL.
+function minimalMat(u) {
+  const out = {};
+  const map = u.mapKind ? null : u.map, bumpTex = u.bumpKind ? null : u.bumpTex, specTex = u.specKind ? null : u.specTex;
+  const hasMap = !!(u.mapKind || u.bumpKind || u.specKind || map || bumpTex || specTex);
+  if (u.kind === 'basic') out.kind = 'basic';
+  if (u.color && u.color.toLowerCase() !== MAT_DEF.color) out.color = u.color;
+  if (u.roughness != null && u.roughness !== MAT_DEF.roughness) out.roughness = u.roughness;   // default 0.8
+  if (u.metalness != null && u.metalness !== MAT_DEF.metalness) out.metalness = u.metalness;   // default 0.1
+  if (u.flatShading === false) out.flatShading = false;              // default true → only note when OFF
+  if (u.emissive && u.emissive !== '#000000') { out.emissive = u.emissive; out.emissiveIntensity = u.emissiveIntensity ?? 1; }
+  if (u.opacity != null && u.opacity !== 1) out.opacity = u.opacity;
+  if (u.transparent) out.transparent = true;
+  if (u.team) out.team = true;                                        // follows team colour
+  if (u.mapKind) out.mapKind = u.mapKind; else if (map) out.map = map;
+  if (u.bumpKind) out.bumpKind = u.bumpKind; else if (bumpTex) out.bumpTex = bumpTex;
+  if ((u.bumpKind || bumpTex) && u.bumpScale != null && u.bumpScale !== 0.4) out.bumpScale = u.bumpScale;
+  if (u.specKind) out.specKind = u.specKind; else if (specTex) out.specTex = specTex;
+  if (hasMap && u.tile && (u.tile[0] !== 1 || u.tile[1] !== 1)) out.tile = u.tile;
+  return out;
 }
 function exportConfig() {
-  return {
+  const cfg = {
     id: meta.id, name: meta.name, category: meta.category, accent: meta.accent,
     destructible: meta.type === '—' ? null : { type: meta.type, hp: meta.hp },
     footprint: { w: meta.fw, d: meta.fd },
@@ -1129,22 +1177,29 @@ function exportConfig() {
       // while the DAMAGE preview is scrubbed, the live transform is animated — the TRUE
       // (intact) transform is snapshotted in _dmg0, so export/save use that.
       const s0 = u._dmg0;
-      const part = {
-        kind: editable ? u.kind : 'frozen',
-        pos: s0 ? s0.pos : m.position.toArray(),
-        rot: s0 ? s0.rot : [m.rotation.x, m.rotation.y, m.rotation.z],
-        scale: s0 ? s0.scale : m.scale.toArray(),
-        mat: serializeMat(u.mat), fallAt: u.fallAt ?? 0, dmgStyle: u.dmgStyle || 'tumble',
-      };
+      const pos = s0 ? s0.pos : m.position.toArray();
+      const rot = s0 ? s0.rot : [m.rotation.x, m.rotation.y, m.rotation.z];
+      const scale = s0 ? s0.scale : m.scale.toArray();
+      const part = { kind: editable ? u.kind : 'frozen' };
+      // Round, then drop trailing default elements: pos/rot default 0, scale default 1.
+      // So [-0.229, 0, 0] → [-0.229] and an identity transform vanishes entirely.
+      const tp = trimTrail(pos, 0), tr = trimTrail(rot, 0), ts = trimTrail(scale, 1);
+      if (tp) part.pos = tp;
+      if (tr) part.rot = tr;
+      if (ts) part.scale = ts;
+      const mat = minimalMat(u.mat); if (Object.keys(mat).length) part.mat = mat;   // omit an all-default material
+      if (u.fallAt) part.fallAt = u.fallAt;                          // default 0
+      if (u.dmgStyle && u.dmgStyle !== 'tumble') part.dmgStyle = u.dmgStyle;
       if (editable && u.parametric) {
-        part.params = u.params || {};                // param-edited → rebuild from params on load
+        if (u.params && Object.keys(u.params).length) part.params = u.params;   // rebuild from params on load
       } else {
         part.geo = m.geometry.toJSON();              // ship the exact geometry…
-        if (editable) part.params = u.params || {};  // …but KEEP the primitive's params so it stays editable (was the freeze-on-reload bug)
+        if (editable && u.params && Object.keys(u.params).length) part.params = u.params;   // …but KEEP params so it stays editable
       }
       return part;
     }),
   };
+  return roundNums(cfg, 3);
 }
 function importConfig(cfg, { silent = false } = {}) {
   clearModel();
@@ -1432,7 +1487,7 @@ function resetAsset() {
   msg('reset to code default'); flashSaved('reset');
 }
 
-document.getElementById('btn-export').addEventListener('click', () => { document.getElementById('export-text').value = JSON.stringify(exportConfig(), null, 1); msg('exported ' + parts().length + ' parts'); });
+document.getElementById('btn-export').addEventListener('click', () => { document.getElementById('export-text').value = JSON.stringify(exportConfig()); msg('exported ' + parts().length + ' parts'); });
 document.getElementById('btn-import').addEventListener('click', () => {
   try { const cfg = JSON.parse(document.getElementById('export-text').value); importConfig(cfg); saveLocal(); msg('imported ' + parts().length + ' parts'); }
   catch (e) { msg('✗ invalid JSON: ' + e.message); }
@@ -1598,6 +1653,7 @@ function thumbMode(on) {
 }
 
 // ── Debug / headless hooks ───────────────────────────────────────────────────
+window.__model = () => model;   // headless tests fingerprint the rendered meshes
 window.AD = {
   assets: ASSETS,
   select: (i) => loadAsset(i, { fresh: true }),   // fresh = ignore localStorage (thumbnails want code default)
