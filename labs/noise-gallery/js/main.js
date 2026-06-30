@@ -47,7 +47,7 @@ void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,
 // noise library — identical functions to texture-lab; main() tiles a grid and warps by time.
 const FRAG = `precision highp float; precision highp int;
 in vec2 vUv; out vec4 outColor;
-uniform float uTime, uWarp, uScaleMul; uniform int uMono, uFocus, uTile;
+uniform float uTime, uWarp, uScaleMul; uniform int uMono, uFocus, uTile, uGrid;
 uniform vec3 uTints[12]; uniform float uScales[12];
 const int COLS=${COLS}, ROWS=${ROWS};
 
@@ -159,7 +159,7 @@ void main(){
     int idx = (ROWS-1-int(cellId.y))*COLS + int(cellId.x);// row 0 = top
     if(idx > 11) idx = 11;
     vec2 d = min(luv, 1.0-luv);
-    float border = smoothstep(0.0, 0.012, min(d.x, d.y)); // thin gutter
+    float border = uGrid==1 ? smoothstep(0.0, 0.012, min(d.x, d.y)) : 1.0; // thin gutter (optional)
     vec2 p = luv * uScales[idx] * uScaleMul + cellId * 31.7;
     vec2 w = vec2(perlin12(p*0.45 + vec2(1.7, t*0.18)), perlin12(p*0.45 + vec2(-4.3, t*0.18)));
     p += (w - 0.5) * 2.6 * uWarp;                         // churn (boils in place)
@@ -197,7 +197,7 @@ const mat = new THREE.RawShaderMaterial({
   vertexShader: VERT, fragmentShader: FRAG, glslVersion: THREE.GLSL3,
   uniforms: {
     uTime: { value: 0 }, uWarp: { value: 0.6 }, uScaleMul: { value: 1 }, uMono: { value: 0 },
-    uFocus: { value: -1 }, uTile: { value: 0 },
+    uFocus: { value: -1 }, uTile: { value: 0 }, uGrid: { value: 1 },
     uTints: { value: uTints }, uScales: { value: SCALE },
   },
 });
@@ -218,6 +218,21 @@ document.getElementById('pause').onclick = e => {
 document.getElementById('mono').onclick = e => {
   const on = mat.uniforms.uMono.value = mat.uniforms.uMono.value ? 0 : 1; e.target.classList.toggle('on', !!on);
 };
+document.getElementById('grid').onclick = e => {
+  const on = mat.uniforms.uGrid.value = mat.uniforms.uGrid.value ? 0 : 1; e.target.classList.toggle('on', !!on);
+};
+// clean / fullscreen view — hide all chrome (and request real fullscreen where allowed)
+document.getElementById('full').onclick = () => {
+  document.body.classList.add('clean');
+  document.documentElement.requestFullscreen?.().catch(() => {});
+};
+document.getElementById('restore').onclick = () => {
+  document.body.classList.remove('clean');
+  if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {});
+};
+document.addEventListener('fullscreenchange', () => {            // leaving fullscreen restores chrome
+  if (!document.fullscreenElement) document.body.classList.remove('clean');
+});
 
 // ── focus mode: tap a tile → fullscreen, with a TILEABLE toggle ───────────────
 const TILEABLE = new Set([1, 2, 3, 7, 8, 10, 11]);   // modes with a clean period
