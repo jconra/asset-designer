@@ -11,7 +11,7 @@ import * as THREE from 'three';
 import { ASSETS } from 'https://rmrfbase.com/js/assets.manifest.js?v=4';
 import { TEAM_COLORS, getCamoTextures } from 'https://rmrfbase.com/js/CamoTexture.js';
 import { concreteTexture, ribbedMetalTexture, fabricTexture, crateTexture, roofTexture, accentPlateTexture, hazardTexture,
-  noiseTexture, grimeTexture, rustTexture, scratchedTexture } from 'https://rmrfbase.com/js/Textures.js?v=3';
+  noiseTexture, grimeTexture, rustTexture, scratchedTexture } from 'https://rmrfbase.com/js/Textures.js?v=4';
 
 // Procedural textures available to apply in the MATERIAL menu.
 const TEX = {
