@@ -11,14 +11,14 @@ import * as THREE from 'three';
 import { ASSETS } from 'https://rmrfbase.com/js/assets.manifest.js?v=4';
 import { TEAM_COLORS, getCamoTextures } from 'https://rmrfbase.com/js/CamoTexture.js';
 import { concreteTexture, ribbedMetalTexture, fabricTexture, crateTexture, roofTexture, accentPlateTexture, hazardTexture,
-  noiseTexture, grimeTexture, rustTexture, scratchedTexture } from 'https://rmrfbase.com/js/Textures.js?v=4';
+  noiseTexture, grimeTexture, woodTexture, scratchedTexture } from 'https://rmrfbase.com/js/Textures.js?v=6';
 
 // Procedural textures available to apply in the MATERIAL menu.
 const TEX = {
   concrete: () => concreteTexture(), metal: () => ribbedMetalTexture(), fabric: () => fabricTexture(),
   crate: () => crateTexture(), roof: () => roofTexture(), accent: () => accentPlateTexture(),
   hazard: () => hazardTexture(),
-  noise: () => noiseTexture(), grime: () => grimeTexture(), rust: () => rustTexture(), scratched: () => scratchedTexture(),
+  noise: () => noiseTexture(), grime: () => grimeTexture(), wood: () => woodTexture(), scratched: () => scratchedTexture(),
   camo: () => camoColorTex(),   // the vehicles' camo, in the current COLOR-menu team colour
 };
 // The camo colour map at the current accent (downscaled from the 512px source to keep

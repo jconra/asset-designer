@@ -1,0 +1,6 @@
+<!doctype html><html><head><script type="importmap">{"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js"}}</script></head><body><script type="module">
+import { buildAssetGroup } from './js/AssetBuilder.js?v=wk1';
+try { const g = buildAssetGroup({parts:[{kind:'box',mat:{mapKind:'wood'}},{kind:'box',pos:[3,0,0],mat:{normalKind:'wood'}}]},'#999');
+  let mapped=0,norm=0; g.traverse(o=>{if(o.isMesh){if(o.material.map)mapped++;if(o.material.normalMap)norm++;}});
+  window.__r={ok:true,mapped,norm}; } catch(e){ window.__r={ok:false,err:e.message}; }
+</script></body></html>
