@@ -201,7 +201,7 @@ let accentIndex = 0;
 let selIndex = -1;       // primary selection (drives the param panels / coords)
 let selSet = [];         // OBJECT-mode multi-selection (part indices); selIndex = the last picked
 let toolMode = null;   // 'add' | 'move' | 'scale' | 'rotate' | 'material' | null
-let matSub = null;     // which MATERIAL sub-tool is open: 'colors'|'textures'|'specular'|'bump'|null
+let matSub = null;     // which MATERIAL sub-tool is open: 'colors'|'textures'|'specular'|'normal'|null
 let dmgPreviewHP = 1;  // DAMAGE-tool preview health (1 = intact .. 0 = destroyed)
 let toolAxis = null;   // 'x' | 'y' | 'z'
 // Blender-style element-selection mode (the right-side icon toolbar):
@@ -241,11 +241,34 @@ function buildTex(kind, tile) {
   if (tile) tex.repeat.set(tile[0], tile[1]);
   return { tex, url };
 }
+// Build a NORMAL map from a kind's procedural texture (its luminance = height). Kept
+// self-contained (not imported from Textures.js) so the designer stays decoupled, but it
+// mirrors the game's toNormalTexture exactly so the designer is WYSIWYG. Data, not colour.
+function buildNormalTex(kind, tile) {
+  const src = TEX[kind](), img = src.image, s = img.width;
+  const sd = img.getContext('2d').getImageData(0, 0, s, s).data;
+  const cv = document.createElement('canvas'); cv.width = cv.height = s;
+  const ctx = cv.getContext('2d'), out = ctx.createImageData(s, s);
+  const H = (x, y) => { const i = (((y + s) % s) * s + ((x + s) % s)) * 4; return (sd[i] * 0.299 + sd[i + 1] * 0.587 + sd[i + 2] * 0.114) / 255; };
+  for (let y = 0; y < s; y++) for (let x = 0; x < s; x++) {
+    let nx = (H(x - 1, y) - H(x + 1, y)) * 2, ny = (H(x, y + 1) - H(x, y - 1)) * 2, nz = 1;
+    const inv = 1 / Math.hypot(nx, ny, nz); nx *= inv; ny *= inv; nz *= inv;
+    const i = (y * s + x) * 4;
+    out.data[i] = (nx * 0.5 + 0.5) * 255; out.data[i + 1] = (ny * 0.5 + 0.5) * 255; out.data[i + 2] = (nz * 0.5 + 0.5) * 255; out.data[i + 3] = 255;
+  }
+  ctx.putImageData(out, 0, 0);
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.NoColorSpace; tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  if (tile) tex.repeat.set(tile[0], tile[1]);
+  let url = null; try { url = cv.toDataURL(); } catch (e) { /* tainted */ }
+  tex.userData = { src: url, kind: (src.userData && src.userData.kind) || kind };
+  return { tex, url };
+}
 // A procedural texture from Textures.js self-identifies via userData.kind — capture it
 // (when it's one of our TEX kinds) so the export ships the short id, not the fat data-URL.
 function texKind(tex) { const k = tex && tex.userData && tex.userData.kind; return k && TEX[k] ? k : null; }
 function matInfo(m) {
-  const anyMap = m.map || m.bumpMap || m.roughnessMap;
+  const anyMap = m.map || m.normalMap || m.roughnessMap;
   return {
     kind: m.isMeshBasicMaterial ? 'basic' : 'standard',
     color: '#' + m.color.getHexString(),
@@ -253,17 +276,17 @@ function matInfo(m) {
     emissive: m.emissive ? '#' + m.emissive.getHexString() : null, emissiveIntensity: m.emissiveIntensity ?? 0,
     opacity: m.opacity ?? 1, transparent: !!m.transparent,
     map: texToURL(m.map), mapKind: texKind(m.map),
-    // bump + spec are now INDEPENDENT map slots (their own texture, no colour map needed);
+    // normal + spec are now INDEPENDENT map slots (their own texture, no colour map needed);
     // one shared tiling drives whichever maps are present.
     tile: anyMap ? [anyMap.repeat.x, anyMap.repeat.y] : null,
-    bumpTex: texToURL(m.bumpMap), bumpKind: texKind(m.bumpMap), bumpScale: m.bumpScale ?? 0.4,
+    normalTex: texToURL(m.normalMap), normalKind: texKind(m.normalMap), normalScale: m.normalScale ? m.normalScale.x : 1,
     specTex: texToURL(m.roughnessMap), specKind: texKind(m.roughnessMap),
   };
 }
 // Canonical material defaults (mirror addMesh's new-part material). The minimal
 // export OMITS any field equal to these; makeMat fills them back in on load, so a
 // stripped material round-trips exactly.
-const MAT_DEF = { kind: 'standard', color: '#b0b6bb', roughness: 0.8, metalness: 0.1, flatShading: true, emissive: null, emissiveIntensity: 0, opacity: 1, transparent: false, bumpScale: 0.4 };
+const MAT_DEF = { kind: 'standard', color: '#b0b6bb', roughness: 0.8, metalness: 0.1, flatShading: true, emissive: null, emissiveIntensity: 0, opacity: 1, transparent: false, normalScale: 1 };
 function makeMat(info) {
   info = { ...MAT_DEF, ...(info || {}) };
   const base = { color: info.color, transparent: info.transparent, opacity: info.opacity, side: THREE.DoubleSide };
@@ -277,9 +300,8 @@ function makeMat(info) {
   // Prefer a procedural KIND id (rebuilt fresh, no base64); fall back to a stored data URL.
   if (info.mapKind && TEX[info.mapKind]) mat.map = buildTex(info.mapKind, tile || [1, 1]).tex;
   else if (info.map) applyMapURL(mat, info.map, tile);
-  if (info.bumpKind && TEX[info.bumpKind]) { mat.bumpMap = buildTex(info.bumpKind, tile || [1, 1]).tex; mat.bumpScale = info.bumpScale ?? 0.4; }
-  else if (info.bumpTex) { mat.bumpMap = texFromURL(info.bumpTex, tile); mat.bumpScale = info.bumpScale ?? 0.4; }
-  else if (info.bump && mat.map) { mat.bumpMap = mat.map; mat.bumpScale = info.bumpScale ?? 0.4; }   // legacy: shared colour map
+  if (info.normalKind && TEX[info.normalKind]) { mat.normalMap = buildNormalTex(info.normalKind, tile || [1, 1]).tex; const ns = info.normalScale ?? 1; mat.normalScale.set(ns, ns); }
+  else if (info.normalTex) { const t = texFromURL(info.normalTex, tile); t.colorSpace = THREE.NoColorSpace; mat.normalMap = t; const ns = info.normalScale ?? 1; mat.normalScale.set(ns, ns); }
   if (mat.isMeshStandardMaterial) {
     if (info.specKind && TEX[info.specKind]) mat.roughnessMap = buildTex(info.specKind, tile || [1, 1]).tex;
     else if (info.specTex) mat.roughnessMap = texFromURL(info.specTex, tile);
@@ -984,15 +1006,17 @@ function applyTexture(kind) {
   }
   mat.needsUpdate = true; refreshMatParams(); syncMapButtons();
 }
-// BUMP map — an INDEPENDENT texture giving surface relief; works with no colour map.
-function applyBumpTex(kind) {
+// NORMAL map — an INDEPENDENT texture giving surface relief; works with no colour map.
+// Derived from the chosen procedural texture (luminance = height); crisper than a bump map.
+function applyNormalTex(kind) {
   const m = parts()[selIndex]; if (!m) return;
   const mat = m.material, u = m.userData.mat;
-  if (!mat.isMeshStandardMaterial) return;   // bump needs a lit material
-  if (kind === 'none') { mat.bumpMap = null; u.bumpTex = null; u.bumpKind = null; }
+  if (!mat.isMeshStandardMaterial) return;   // normal maps need a lit material
+  if (kind === 'none') { mat.normalMap = null; u.normalTex = null; u.normalKind = null; }
   else {
-    const { tex, url } = buildTex(kind, u.tile || [1, 1]);
-    mat.bumpMap = tex; mat.bumpScale = u.bumpScale ?? 0.4; u.bumpTex = url; u.bumpKind = kind === 'camo' ? null : kind; u.bumpScale = mat.bumpScale; u.tile = u.tile || [1, 1];
+    const { tex, url } = buildNormalTex(kind, u.tile || [1, 1]);
+    const ns = u.normalScale ?? 1; mat.normalMap = tex; mat.normalScale.set(ns, ns);
+    u.normalTex = url; u.normalKind = kind === 'camo' ? null : kind; u.normalScale = ns; u.tile = u.tile || [1, 1];
   }
   mat.needsUpdate = true;
 }
@@ -1008,25 +1032,25 @@ function applySpecTex(kind) {
   }
   mat.needsUpdate = true;
 }
-function setBumpScale(v) {
-  const m = parts()[selIndex]; if (!m) return;
-  m.material.bumpScale = v; m.userData.mat.bumpScale = v; m.material.needsUpdate = true;
+function setNormalScale(v) {
+  const m = parts()[selIndex]; if (!m || !m.material.isMeshStandardMaterial) return;
+  m.material.normalScale.set(v, v); m.userData.mat.normalScale = v; m.material.needsUpdate = true;
 }
-// One tiling drives every map slot the part has (colour / bump / spec).
+// One tiling drives every map slot the part has (colour / normal / spec).
 function setTile(axis, v) {
   const m = parts()[selIndex]; if (!m) return;
-  const mat = m.material, maps = [mat.map, mat.bumpMap, mat.roughnessMap].filter(Boolean);
+  const mat = m.material, maps = [mat.map, mat.normalMap, mat.roughnessMap].filter(Boolean);
   if (!maps.length) return;
   for (const map of maps) { map.wrapS = map.wrapT = THREE.RepeatWrapping; if (axis === 'x') map.repeat.x = v; else map.repeat.y = v; map.needsUpdate = true; }
   m.userData.mat.tile = [maps[0].repeat.x, maps[0].repeat.y];
 }
 // Top-stack panel under MATERIAL: the active sub-tool's map controls — TILING for the
-// slot it edits (colour / bump / spec), plus the BUMP LEVEL when the BUMP menu is open.
+// slot it edits (colour / normal / spec), plus the NORMAL STRENGTH when that menu is open.
 function refreshMatParams() {
   const wrap = document.getElementById('mat-params'); if (!wrap) return;
   const m = parts()[selIndex], mat = m ? m.material : null;
   // which map does the open sub-tool care about?
-  const slot = !mat ? null : matSub === 'bump' ? mat.bumpMap : matSub === 'specular' ? mat.roughnessMap : matSub === 'textures' ? mat.map : null;
+  const slot = !mat ? null : matSub === 'normal' ? mat.normalMap : matSub === 'specular' ? mat.roughnessMap : matSub === 'textures' ? mat.map : null;
   if (toolMode !== 'material' || !slot) { wrap.style.display = 'none'; wrap.innerHTML = ''; syncTopBox(); return; }
   wrap.style.display = 'flex';
   const u = m.userData.mat, tile = u.tile || [slot.repeat.x, slot.repeat.y];
@@ -1034,12 +1058,12 @@ function refreshMatParams() {
     `<span class="gmode">TILE</span>` +
     `<label>X</label><input id="mp-tx" type="number" step="0.5" min="0.1" value="${+tile[0].toFixed(2)}">` +
     `<label>Y</label><input id="mp-ty" type="number" step="0.5" min="0.1" value="${+tile[1].toFixed(2)}">`;
-  if (matSub === 'bump') html += `<label style="margin-left:10px">LEVEL</label><input id="mp-bs" type="number" step="0.1" min="0" value="${(u.bumpScale ?? 0.4)}">`;
+  if (matSub === 'normal') html += `<label style="margin-left:10px">STRENGTH</label><input id="mp-bs" type="number" step="0.1" min="0" value="${(u.normalScale ?? 1)}">`;
   wrap.innerHTML = html;
   syncTopBox();
   document.getElementById('mp-tx').addEventListener('change', e => { const v = parseFloat(e.target.value); if (v > 0) setTile('x', v); });
   document.getElementById('mp-ty').addEventListener('change', e => { const v = parseFloat(e.target.value); if (v > 0) setTile('y', v); });
-  const bs = document.getElementById('mp-bs'); if (bs) bs.addEventListener('change', e => { const v = parseFloat(e.target.value); if (!Number.isNaN(v)) setBumpScale(v); });
+  const bs = document.getElementById('mp-bs'); if (bs) bs.addEventListener('change', e => { const v = parseFloat(e.target.value); if (!Number.isNaN(v)) setNormalScale(v); });
 }
 
 // ── Destruction staging (DAMAGE tool) ─────────────────────────────────────────
@@ -1148,8 +1172,8 @@ function roundNums(o, dp = 3) {
 // (mapKind/…) and drop the fat data-URL; baked textures (no kind) keep their data-URL.
 function minimalMat(u) {
   const out = {};
-  const map = u.mapKind ? null : u.map, bumpTex = u.bumpKind ? null : u.bumpTex, specTex = u.specKind ? null : u.specTex;
-  const hasMap = !!(u.mapKind || u.bumpKind || u.specKind || map || bumpTex || specTex);
+  const map = u.mapKind ? null : u.map, normalTex = u.normalKind ? null : u.normalTex, specTex = u.specKind ? null : u.specTex;
+  const hasMap = !!(u.mapKind || u.normalKind || u.specKind || map || normalTex || specTex);
   if (u.kind === 'basic') out.kind = 'basic';
   if (u.color && u.color.toLowerCase() !== MAT_DEF.color) out.color = u.color;
   if (u.roughness != null && u.roughness !== MAT_DEF.roughness) out.roughness = u.roughness;   // default 0.8
@@ -1160,8 +1184,8 @@ function minimalMat(u) {
   if (u.transparent) out.transparent = true;
   if (u.team) out.team = true;                                        // follows team colour
   if (u.mapKind) out.mapKind = u.mapKind; else if (map) out.map = map;
-  if (u.bumpKind) out.bumpKind = u.bumpKind; else if (bumpTex) out.bumpTex = bumpTex;
-  if ((u.bumpKind || bumpTex) && u.bumpScale != null && u.bumpScale !== 0.4) out.bumpScale = u.bumpScale;
+  if (u.normalKind) out.normalKind = u.normalKind; else if (normalTex) out.normalTex = normalTex;
+  if ((u.normalKind || normalTex) && u.normalScale != null && u.normalScale !== 1) out.normalScale = u.normalScale;
   if (u.specKind) out.specKind = u.specKind; else if (specTex) out.specTex = specTex;
   if (hasMap && u.tile && (u.tile[0] !== 1 || u.tile[1] !== 1)) out.tile = u.tile;
   return out;
@@ -1349,7 +1373,7 @@ colorsEl.querySelectorAll('.accent-sw').forEach(b => b.addEventListener('click',
   updateTeamSwatch();
 }));
 
-// MATERIAL nested flyout: MATERIAL → [COLORS, TEXTURES, SPECULAR, BUMP] sub-tools,
+// MATERIAL nested flyout: MATERIAL → [COLORS, TEXTURES, SPECULAR, NORMAL] sub-tools,
 // each of which flies its own samples/options further left. Leaf buttons keep their
 // data-* hooks so one set of listeners (queried under #material-kids) wires them all.
 const MAT_PALETTE = ['#e8e8e8', '#9a948a', '#6f6a61', '#3b3f44', ...TEAM_COLORS.slice(0, 4).map(c => c.hex)];
@@ -1360,28 +1384,28 @@ const texSwatches = Object.keys(TEX).map(k => {
 const noneSwatch = `<button class="sw none-sw" data-tex="none" title="no texture">∅</button>`;
 const teamSwatch = `<button class="sw team-sw" data-team="1" title="team colour (follows the COLOR menu)">T</button>`;
 const colorSwatches = MAT_PALETTE.map(h => `<button class="sw" style="background:${h}" data-color="${h}"></button>`).join('');
-// BUMP + SPEC are independent texture pickers now (∅ + the same texture swatches).
+// NORMAL + SPEC are independent texture pickers now (∅ + the same texture swatches).
 const texSwatchesFor = (attr) => `<button class="sw none-sw" ${attr}="none" title="no map">∅</button>` + Object.keys(TEX).map(k => {
   let url = ''; try { url = TEX[k]().image.toDataURL(); } catch (e) { /* ignore */ }
   return `<button class="sw tex" ${attr}="${k}" title="${k}" style="background-image:url(${url})"></button>`;
 }).join('');
 document.getElementById('sub-textures').innerHTML = texSwatches + noneSwatch;
 document.getElementById('sub-colors').innerHTML = teamSwatch + colorSwatches;
-document.getElementById('sub-bump').innerHTML = texSwatchesFor('data-bumptex');
+document.getElementById('sub-normal').innerHTML = texSwatchesFor('data-normaltex');
 document.getElementById('sub-specular').innerHTML = texSwatchesFor('data-spectex');
 
 document.querySelectorAll('#material-kids [data-tex]').forEach(b => b.addEventListener('click', () => applyTexture(b.dataset.tex)));
 document.querySelectorAll('#material-kids [data-team]').forEach(b => b.addEventListener('click', applyTeamColor));
 document.querySelectorAll('#material-kids [data-color]').forEach(b => b.addEventListener('click', () => setColor(b.dataset.color)));
-document.querySelectorAll('#material-kids [data-bumptex]').forEach(b => b.addEventListener('click', () => { applyBumpTex(b.dataset.bumptex); syncMapButtons(); refreshMatParams(); }));
+document.querySelectorAll('#material-kids [data-normaltex]').forEach(b => b.addEventListener('click', () => { applyNormalTex(b.dataset.normaltex); syncMapButtons(); refreshMatParams(); }));
 document.querySelectorAll('#material-kids [data-spectex]').forEach(b => b.addEventListener('click', () => { applySpecTex(b.dataset.spectex); syncMapButtons(); refreshMatParams(); }));
 function updateTeamSwatch() { const el = document.querySelector('#material-kids .team-sw'); if (el) el.style.background = TEAM_COLORS[accentIndex].hex; }
 updateTeamSwatch();
 
-// Reflect the selected part's bump/spec state — highlight ∅ when that slot is empty.
+// Reflect the selected part's normal/spec state — highlight ∅ when that slot is empty.
 function syncMapButtons() {
   const m = parts()[selIndex], mat = m ? m.material : null;
-  document.querySelectorAll('#sub-bump [data-bumptex="none"]').forEach(b => b.classList.toggle('active', !mat || !mat.bumpMap));
+  document.querySelectorAll('#sub-normal [data-normaltex="none"]').forEach(b => b.classList.toggle('active', !mat || !mat.normalMap));
   document.querySelectorAll('#sub-specular [data-spectex="none"]').forEach(b => b.classList.toggle('active', !mat || !mat.roughnessMap));
 }
 
@@ -1392,7 +1416,7 @@ document.querySelectorAll('.subtool > .subtool-btn').forEach(btn => {
     const opening = !sub.classList.contains('active');
     document.querySelectorAll('.subtool').forEach(x => x.classList.remove('active'));
     matSub = opening ? sub.dataset.sub : null;
-    if (opening) { sub.classList.add('active'); if (matSub === 'specular' || matSub === 'bump') syncMapButtons(); }
+    if (opening) { sub.classList.add('active'); if (matSub === 'specular' || matSub === 'normal') syncMapButtons(); }
     refreshMatParams();   // TILING pops in only under TEXTURES
   });
 });
@@ -1666,9 +1690,9 @@ window.AD = {
   setAccent: (i) => { accentIndex = i; applyAccent(TEAM_COLORS[i].hex); },
   partHasMap: (i) => !!(parts()[i] && parts()[i].material.map),
   partTeam: (i) => !!(parts()[i] && parts()[i].userData.mat && parts()[i].userData.mat.team),
-  // texture-map hooks (headless): tiling, bump, spec + a readback
+  // texture-map hooks (headless): tiling, normal, spec + a readback
   matTile: (x, y) => { setTile('x', x); setTile('y', y); },
-  matBump: (kind, scale) => { applyBumpTex(kind); if (scale != null) setBumpScale(scale); },
+  matNormal: (kind, scale) => { applyNormalTex(kind); if (scale != null) setNormalScale(scale); },
   matSpec: (kind) => applySpecTex(kind),
   // damage-staging hooks (headless)
   damageMode: (on) => { if (dmgActive()) dmgRestore(); toolMode = on ? 'damage' : null; if (on) { dmgSnapshot(); dmgPreviewHP = 1; } },
@@ -1678,7 +1702,7 @@ window.AD = {
   partPos: (i) => { const m = parts()[i]; return m ? m.position.toArray() : null; },
   partScale: (i) => { const m = parts()[i]; return m ? m.scale.toArray() : null; },
   partFall: (i) => { const m = parts()[i]; return m ? { fallAt: m.userData.fallAt, style: m.userData.dmgStyle } : null; },
-  partMaps: (i) => { const m = parts()[i]; if (!m) return null; const t = m.material, a = t.map || t.bumpMap || t.roughnessMap; return { map: !!t.map, bump: !!t.bumpMap, spec: !!t.roughnessMap, bumpScale: t.bumpScale, tile: a ? [a.repeat.x, a.repeat.y] : null }; },
+  partMaps: (i) => { const m = parts()[i]; if (!m) return null; const t = m.material, a = t.map || t.normalMap || t.roughnessMap; return { map: !!t.map, normal: !!t.normalMap, spec: !!t.roughnessMap, normalScale: t.normalScale ? t.normalScale.x : null, tile: a ? [a.repeat.x, a.repeat.y] : null }; },
   setGeomParam: (key, val) => { const m = parts()[selIndex]; if (m && m.userData.kind !== 'frozen') { m.userData.params[key] = val; rebuildGeo(); } },
   partKind: (i) => parts()[i] ? parts()[i].userData.kind : null,
   partColor: (i) => parts()[i] ? '#' + parts()[i].material.color.getHexString() : null,
