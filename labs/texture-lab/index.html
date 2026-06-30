@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Texture Lab</title>
+<script src="/oops.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; background: #0d1410; font-family: 'Courier New', monospace; color: #cfe9d8; }
+  canvas#scene { display: block; position: fixed; inset: 0; }
+  .panel {
+    position: fixed; z-index: 10; background: rgba(8, 20, 14, 0.92);
+    border: 1px solid #2c6a47; border-radius: 8px; padding: 9px 10px;
+    box-shadow: 0 4px 18px rgba(0,0,0,0.45); backdrop-filter: blur(3px);
+  }
+  .panel h2 { font-size: 11px; letter-spacing: 2px; color: #5dff9f; margin-bottom: 7px; font-weight: bold; cursor: pointer; user-select: none; }
+  .panel h2::after { content: ' ▾'; font-size: 9px; opacity: 0.7; }
+  .panel.min h2::after { content: ' ▸'; }
+  .panel.min h2 { margin-bottom: 0; }
+  .panel.min > *:not(h2) { display: none !important; }
+  /* title */
+  #title { top: 12px; left: 12px; }
+  #title .t { font-size: 18px; font-weight: bold; letter-spacing: 5px; color: #7fffb8; }
+  #title .s { font-size: 10px; opacity: 0.6; letter-spacing: 1px; }
+  #title .nav { margin-top: 7px; display: flex; flex-wrap: wrap; gap: 5px; }
+  #title .nav a { font-size: 10px; color: #7fc79c; text-decoration: none; border: 1px solid #245a3c;
+    border-radius: 4px; padding: 3px 7px; letter-spacing: 0.5px; }
+  #title .nav a:hover { color: #5dff9f; border-color: #5dff9f; }
+  /* texture picker */
+  #picker { top: 104px; left: 12px; width: 132px; max-height: 72vh; overflow-y: auto; }
+  .tex-btn {
+    display: block; width: 100%; text-align: left; margin: 3px 0; padding: 5px 8px;
+    font-family: inherit; font-size: 12px; cursor: pointer; border-radius: 5px;
+    background: rgba(5, 16, 11, 0.9); color: #7fc79c; border: 1px solid #245a3c;
+  }
+  .tex-btn.on { background: #11331f; color: #5dff9f; border-color: #5dff9f; }
+  /* params */
+  #params { top: 64px; right: 12px; width: 226px; max-height: 78vh; overflow-y: auto; }
+  .row { margin: 7px 0; }
+  .row label { display: block; font-size: 10px; letter-spacing: 0.5px; opacity: 0.85; margin-bottom: 2px; }
+  .row .val { float: right; color: #5dff9f; opacity: 1; }
+  .row input[type=range] { width: 100%; accent-color: #5dff9f; height: 16px; }
+  .row input[type=color] { width: 100%; height: 26px; background: none; border: 1px solid #245a3c; border-radius: 4px; }
+  /* 2D preview */
+  #preview2d { bottom: 12px; left: 12px; }
+  #preview2d canvas { width: 192px; height: 192px; image-rendering: auto; border: 1px solid #2c6a47; border-radius: 4px; display: block; background: #fff; }
+  #preview2d .ctrls { margin-top: 6px; display: flex; gap: 8px; align-items: center; font-size: 11px; }
+  #preview2d button, #export button {
+    font-family: inherit; font-size: 11px; cursor: pointer; padding: 3px 8px; border-radius: 4px;
+    background: rgba(5,16,11,0.9); color: #7fc79c; border: 1px solid #245a3c;
+  }
+  #preview2d button.on { color: #5dff9f; border-color: #5dff9f; }
+  /* export */
+  #export { bottom: 12px; right: 12px; width: 226px; }
+  #export textarea { width: 100%; height: 70px; font-family: inherit; font-size: 10px; resize: none;
+    background: #06120b; color: #9fe9c0; border: 1px solid #245a3c; border-radius: 4px; padding: 5px; }
+  #export .er { display: flex; gap: 8px; margin-top: 6px; }
+  #hint { position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%); z-index: 9;
+    font-size: 10px; opacity: 0.55; letter-spacing: 1px; pointer-events: none; }
+</style>
+</head>
+<body>
+<canvas id="scene"></canvas>
+
+<div id="title" class="panel">
+  <div class="t">TEX·LAB</div>
+  <div class="s">tune procedural textures live</div>
+  <div class="nav">
+    <a href="../noise-gallery/">Noise Gallery →</a>
+    <a href="../surface-lab/">Bump vs Normal →</a>
+    <a href="../">All Labs</a>
+  </div>
+</div>
+
+<div id="picker" class="panel">
+  <h2>TEXTURE</h2>
+  <div id="tex-list"></div>
+</div>
+
+<div id="params" class="panel">
+  <h2 id="params-title">PARAMETERS</h2>
+  <div id="param-rows"></div>
+</div>
+
+<div id="preview2d" class="panel">
+  <h2>SWATCH</h2>
+  <canvas id="swatch" width="192" height="192"></canvas>
+  <div class="ctrls">
+    <button id="tile-btn">TILE 2×2</button>
+    <span id="size-lbl">128px</span>
+  </div>
+</div>
+
+<div id="export" class="panel">
+  <h2>EXPORT PARAMS</h2>
+  <textarea id="export-text" readonly></textarea>
+  <div class="er">
+    <button id="copy-btn">COPY</button>
+    <button id="reset-btn">RESET</button>
+  </div>
+</div>
+
+<div id="hint">drag = orbit · scroll = zoom · tune on the right · paste the EXPORT to bake into the game</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+} }
+</script>
+<script type="module" src="js/main.js?v=3"></script>
+</body>
+</html>

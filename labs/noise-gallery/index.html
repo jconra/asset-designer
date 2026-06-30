@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Noise Gallery</title>
+<script src="/oops.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; background: #07100c; font-family: 'Courier New', monospace; color: #cfe9d8; }
+  canvas#scene { display: block; position: fixed; inset: 0; cursor: pointer; }
+  /* tile labels overlaid on the shader grid */
+  #labels { position: fixed; inset: 0; display: grid; pointer-events: none; z-index: 5; }
+  #labels .cell { position: relative; }
+  #labels .cell span {
+    position: absolute; left: 7px; bottom: 6px; font-size: 11px; letter-spacing: 1.5px;
+    color: #eafff2; text-shadow: 0 1px 3px rgba(0,0,0,0.9); opacity: 0.92;
+  }
+  #title { position: fixed; top: 12px; left: 14px; z-index: 6; pointer-events: none; }
+  #title .t { font-size: 17px; font-weight: bold; letter-spacing: 5px; color: #7fffb8; text-shadow: 0 2px 6px rgba(0,0,0,0.8); }
+  #title .s { font-size: 10px; opacity: 0.6; letter-spacing: 1px; }
+  #title .nav { margin-top: 7px; display: flex; flex-wrap: wrap; gap: 5px; pointer-events: auto; }
+  #title .nav a { font-size: 10px; color: #cfe9d8; text-decoration: none; background: rgba(8,20,14,0.85);
+    border: 1px solid #2c6a47; border-radius: 4px; padding: 3px 7px; letter-spacing: 0.5px; }
+  #title .nav a:hover { color: #5dff9f; border-color: #5dff9f; }
+  /* controls */
+  #ctrls {
+    position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%); z-index: 8;
+    display: flex; gap: 14px; align-items: center; padding: 9px 14px;
+    background: rgba(8, 20, 14, 0.9); border: 1px solid #2c6a47; border-radius: 9px;
+    box-shadow: 0 4px 18px rgba(0,0,0,0.5); backdrop-filter: blur(3px);
+  }
+  #ctrls .grp { display: flex; flex-direction: column; gap: 2px; }
+  #ctrls label { font-size: 9px; letter-spacing: 1px; opacity: 0.8; }
+  #ctrls input[type=range] { width: 96px; accent-color: #5dff9f; height: 16px; }
+  #ctrls button {
+    font-family: inherit; font-size: 12px; cursor: pointer; padding: 7px 12px; border-radius: 6px;
+    background: rgba(5,16,11,0.9); color: #7fc79c; border: 1px solid #245a3c;
+  }
+  #ctrls button.on { color: #5dff9f; border-color: #5dff9f; }
+  /* fullscreen focus bar (hidden until a tile is tapped) */
+  #focusbar {
+    position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 9;
+    display: none; gap: 12px; align-items: center; padding: 8px 14px;
+    background: rgba(8, 20, 14, 0.92); border: 1px solid #2c6a47; border-radius: 9px;
+    box-shadow: 0 4px 18px rgba(0,0,0,0.5); backdrop-filter: blur(3px);
+  }
+  #focusbar.show { display: flex; }
+  #focusbar button {
+    font-family: inherit; font-size: 12px; cursor: pointer; padding: 7px 12px; border-radius: 6px;
+    background: rgba(5,16,11,0.9); color: #7fc79c; border: 1px solid #245a3c;
+  }
+  #focusbar button.on { color: #5dff9f; border-color: #5dff9f; }
+  #focus-name { font-size: 14px; font-weight: bold; letter-spacing: 3px; color: #7fffb8; }
+  #tile-status { font-size: 10px; letter-spacing: 0.5px; max-width: 230px; opacity: 0.85; }
+  #tile-status.ok { color: #7fffb8; } #tile-status.no { color: #ffcf7f; }
+  body.focused #labels, body.focused #title { display: none; }
+</style>
+</head>
+<body>
+<canvas id="scene"></canvas>
+<div id="labels"></div>
+<div id="title">
+  <div class="t">NOISE·GALLERY</div>
+  <div class="s">twelve living procedural fields · tap a tile to fill the screen</div>
+  <div class="nav">
+    <a href="../texture-lab/">Tex Lab →</a>
+    <a href="../surface-lab/">Bump vs Normal →</a>
+    <a href="../">All Labs</a>
+  </div>
+</div>
+<div id="focusbar">
+  <button id="back">← BACK</button>
+  <span id="focus-name">—</span>
+  <button id="tileable">TILEABLE: OFF</button>
+  <span id="tile-status"></span>
+</div>
+<div id="ctrls">
+  <button id="pause">⏸ PAUSE</button>
+  <div class="grp"><label>SPEED <span id="spd-v">1.0</span></label><input id="spd" type="range" min="0" max="3" step="0.05" value="1"></div>
+  <div class="grp"><label>CHURN <span id="warp-v">0.6</span></label><input id="warp" type="range" min="0" max="2" step="0.05" value="0.6"></div>
+  <div class="grp"><label>SCALE <span id="scl-v">1.0</span></label><input id="scl" type="range" min="0.4" max="2.5" step="0.05" value="1"></div>
+  <button id="mono">TINT</button>
+</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module" src="js/main.js?v=2"></script>
+</body>
+</html>

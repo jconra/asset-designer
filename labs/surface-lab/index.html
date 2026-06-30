@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Bump vs Normal</title>
+<script src="/oops.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; background: #0b0e14; font-family: 'Courier New', monospace; color: #d4dce8; }
+  canvas#scene { display: block; position: fixed; inset: 0; }
+  .panel {
+    position: fixed; z-index: 10; background: rgba(12, 16, 24, 0.92);
+    border: 1px solid #34507a; border-radius: 8px; padding: 9px 10px;
+    box-shadow: 0 4px 18px rgba(0,0,0,0.5); backdrop-filter: blur(3px);
+  }
+  .panel h2 { font-size: 11px; letter-spacing: 2px; color: #74b0ff; margin-bottom: 7px; font-weight: bold; cursor: pointer; user-select: none; }
+  .panel h2::after { content: ' ▾'; font-size: 9px; opacity: 0.7; }
+  .panel.min h2::after { content: ' ▸'; }
+  .panel.min h2 { margin-bottom: 0; }
+  .panel.min > *:not(h2) { display: none !important; }
+  #title { top: 12px; left: 12px; cursor: pointer; user-select: none; }
+  #title .t { font-size: 18px; font-weight: bold; letter-spacing: 4px; color: #9fd0ff; }
+  #title .t::after { content: ' ▾'; font-size: 11px; opacity: 0.55; }
+  #title.folded .t::after { content: ' ▸'; }
+  #title .s { font-size: 10px; opacity: 0.6; letter-spacing: 1px; }
+  #title .nav { margin-top: 7px; display: flex; flex-wrap: wrap; gap: 5px; }
+  #title .nav a { font-size: 10px; color: #8fb6e6; text-decoration: none; border: 1px solid #2a466e;
+    border-radius: 4px; padding: 3px 7px; letter-spacing: 0.5px; }
+  #title .nav a:hover { color: #9fd0ff; border-color: #9fd0ff; }
+  /* texture picker */
+  #picker { top: 110px; left: 12px; width: 130px; max-height: 70vh; overflow-y: auto; }
+  .tex-btn {
+    display: block; width: 100%; text-align: left; margin: 3px 0; padding: 5px 8px;
+    font-family: inherit; font-size: 12px; cursor: pointer; border-radius: 5px;
+    background: rgba(8, 12, 20, 0.9); color: #8fb6e6; border: 1px solid #2a466e;
+  }
+  .tex-btn.on { background: #14233b; color: #9fd0ff; border-color: #9fd0ff; }
+  /* params */
+  #params { top: 70px; right: 12px; width: 220px; max-height: 80vh; overflow-y: auto; }
+  .row { margin: 8px 0; }
+  .row label { display: block; font-size: 10px; letter-spacing: 0.5px; opacity: 0.85; margin-bottom: 2px; }
+  .row .val { float: right; color: #9fd0ff; }
+  .row input[type=range] { width: 100%; accent-color: #74b0ff; height: 16px; }
+  .row input[type=color] { width: 100%; height: 26px; background: none; border: 1px solid #2a466e; border-radius: 4px; }
+  .row.btn button {
+    width: 100%; font-family: inherit; font-size: 12px; cursor: pointer; padding: 6px; border-radius: 5px;
+    background: rgba(8,12,20,0.9); color: #8fb6e6; border: 1px solid #2a466e;
+  }
+  .row.btn button.on { color: #9fd0ff; border-color: #9fd0ff; }
+  /* source maps inset */
+  #maps { bottom: 12px; left: 12px; display: flex; gap: 10px; }
+  #maps .m { text-align: center; }
+  #maps canvas { width: 92px; height: 92px; border: 1px solid #34507a; border-radius: 4px; display: block; image-rendering: auto; }
+  #maps .cap { font-size: 9px; letter-spacing: 1px; opacity: 0.7; margin-top: 3px; }
+  /* big side labels */
+  .sidelabel { position: fixed; bottom: 14px; z-index: 8; font-size: 13px; font-weight: bold;
+    letter-spacing: 3px; text-shadow: 0 2px 5px #000; pointer-events: none; }
+  #lab-bump { left: 27%; color: #ffb27f; }
+  #lab-norm { right: 27%; color: #8fffb0; }
+  #hint { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 6;
+    font-size: 10px; opacity: 0.5; letter-spacing: 1px; pointer-events: none; }
+</style>
+</head>
+<body>
+<canvas id="scene"></canvas>
+
+<div id="title" class="panel">
+  <div class="t">BUMP vs NORMAL</div>
+  <div class="s">same height field · two ways to fake relief</div>
+  <div class="nav">
+    <a href="../texture-lab/">Tex Lab →</a>
+    <a href="../noise-gallery/">Noise Gallery →</a>
+    <a href="../">All Labs</a>
+  </div>
+</div>
+
+<div id="picker" class="panel">
+  <h2>HEIGHT SOURCE</h2>
+  <div id="tex-list"></div>
+</div>
+
+<div id="params" class="panel">
+  <h2>CONTROLS</h2>
+  <div id="param-rows"></div>
+</div>
+
+<div id="maps" class="panel">
+  <div class="m"><canvas id="height-cv" width="128" height="128"></canvas><div class="cap">HEIGHT (gray)</div></div>
+  <div class="m"><canvas id="normal-cv" width="128" height="128"></canvas><div class="cap">NORMAL (rgb)</div></div>
+</div>
+
+<div id="lab-bump" class="sidelabel">◀ BUMP MAP</div>
+<div id="lab-norm" class="sidelabel">NORMAL MAP ▶</div>
+<div id="hint">drag = orbit camera · the light sweeps so you can watch the relief</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+} }
+</script>
+<script type="module" src="js/main.js?v=2"></script>
+</body>
+</html>

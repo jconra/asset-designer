@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Asset Labs</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { min-height: 100%; background: #0c1014; font-family: 'Courier New', monospace; color: #d6e0d8; }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 46px 22px 60px; }
+  h1 { font-size: 26px; letter-spacing: 6px; color: #8fe6b4; margin-bottom: 4px; }
+  .sub { font-size: 12px; opacity: 0.6; letter-spacing: 1px; margin-bottom: 28px; }
+  .card {
+    display: block; text-decoration: none; color: inherit; margin: 12px 0; padding: 16px 18px;
+    background: rgba(18, 26, 22, 0.9); border: 1px solid #2c5a40; border-radius: 10px; transition: 0.15s;
+  }
+  .card:hover { border-color: #5dff9f; transform: translateX(4px); }
+  .card .name { font-size: 16px; font-weight: bold; letter-spacing: 2px; color: #7fffb8; }
+  .card .desc { font-size: 12px; opacity: 0.78; margin-top: 4px; line-height: 1.5; }
+  .back { display: inline-block; margin-top: 26px; font-size: 11px; color: #7fc79c; text-decoration: none; opacity: 0.8; }
+  .back:hover { color: #5dff9f; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ASSET·LABS</h1>
+  <div class="sub">procedural texture & shading playgrounds</div>
+
+  <a class="card" href="texture-lab/">
+    <div class="name">TEX·LAB</div>
+    <div class="desc">Tune the game's procedural textures live on a 3D tent &amp; box, then export the params to bake into the game.</div>
+  </a>
+  <a class="card" href="noise-gallery/">
+    <div class="name">NOISE GALLERY</div>
+    <div class="desc">Twelve procedural noise fields animating at once. Tap a tile to fill the screen and toggle tileable to watch the seam vanish.</div>
+  </a>
+  <a class="card" href="surface-lab/">
+    <div class="name">BUMP vs NORMAL</div>
+    <div class="desc">Same height field, two ways to fake relief — side by side under a sweeping light, with an optional matching specular map.</div>
+  </a>
+
+  <a class="back" href="../">← back to the asset designer</a>
+</div>
+</body>
+</html>
