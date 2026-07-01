@@ -22,8 +22,9 @@ const TEX = {
   camo: () => camoColorTex(),   // the vehicles' camo, in the current COLOR-menu team colour
 };
 // The camo colour map at the current accent (downscaled from the 512px source to keep
-// the baked data URL reasonable). Camo depends on the team colour + a random seed, so it
-// can't round-trip by kind id like the procedural textures — it bakes to base64 instead.
+// the baked data URL reasonable). Camo exports by KIND id like the other procedural
+// textures; the game rebuilds it fresh in the part's team colour (AssetBuilder handles
+// 'camo' specially), so the export stays tiny — no base64 blob.
 function camoColorTex() {
   const src = getCamoTextures(accentIndex).map.image;   // 512px camo canvas (cached per colour)
   const c = document.createElement('canvas'); c.width = c.height = 256;
@@ -194,6 +195,16 @@ function updateCamera() {
     target.z + Math.cos(camTheta) * Math.sin(camPhi) * camRadius);
   camera.lookAt(target);
   updateGizmo();   // keep the gizmo a constant on-screen size as we orbit/zoom
+}
+const _panR = new THREE.Vector3(), _panU = new THREE.Vector3();
+// Blender-style pan: slide the orbit target across the camera's screen plane so the scene
+// tracks the cursor 1:1 at the target distance (shift + middle mouse).
+function panCamera(dx, dy) {
+  _panR.setFromMatrixColumn(camera.matrixWorld, 0);   // world-space screen-right
+  _panU.setFromMatrixColumn(camera.matrixWorld, 1);   // world-space screen-up
+  const k = (2 * camRadius * Math.tan(camera.fov * Math.PI / 360)) / container.clientHeight;
+  target.addScaledVector(_panR, -dx * k).addScaledVector(_panU, dy * k);
+  updateCamera();
 }
 window.setCameraView = ({ theta, phi, radius } = {}) => {
   if (theta != null) camTheta = theta; if (phi != null) camPhi = phi; if (radius != null) camRadius = radius;
@@ -587,10 +598,14 @@ function clearVertHandles() {
 const vertexActive = () => elemMode();
 const elemSig = a => [...a].sort((x, y) => x - y).join(',');
 // Combine a freshly-picked element into the selection per the active op.
-function applyPick(groups) {
+function applyPick(groups, additive = false) {
   if (!groups) return false;
   const s = elemSig(groups);
-  if (selOp === 'subtract') selElems = selElems.filter(e => elemSig(e) !== s);
+  if (additive) {   // SHIFT: toggle this element in/out, like object multi-select
+    const at = selElems.findIndex(e => elemSig(e) === s);
+    if (at >= 0) selElems.splice(at, 1); else selElems.push(groups);
+  }
+  else if (selOp === 'subtract') selElems = selElems.filter(e => elemSig(e) !== s);
   else if (selOp === 'add') { if (!selElems.some(e => elemSig(e) === s)) selElems.push(groups); }
   else selElems = [groups];
   updateElemHilite(); updateHint(); return true;
@@ -1061,7 +1076,7 @@ function applyTexture(kind) {
     mat.map = tex; mat.color.set('#ffffff');     // white base so the texture reads true
     // remember the procedural KIND so export can reference it by id (no fat base64);
     // u.map keeps the data URL only as a fallback for round-tripping.
-    u.color = '#ffffff'; u.map = url; u.mapKind = kind === 'camo' ? null : kind; u.tile = u.tile || [1, 1];
+    u.color = '#ffffff'; u.map = url; u.mapKind = kind; u.tile = u.tile || [1, 1];
   }
   mat.needsUpdate = true; refreshMatParams(); syncMapButtons();
 }
@@ -1075,7 +1090,7 @@ function applyNormalTex(kind) {
   else {
     const { tex, url } = buildNormalTex(kind, u.tile || [1, 1], u.rot || 0);
     const ns = u.normalScale ?? 1; mat.normalMap = tex; mat.normalScale.set(ns, ns);
-    u.normalTex = url; u.normalKind = kind === 'camo' ? null : kind; u.normalScale = ns; u.tile = u.tile || [1, 1];
+    u.normalTex = url; u.normalKind = kind; u.normalScale = ns; u.tile = u.tile || [1, 1];
   }
   mat.needsUpdate = true;
 }
@@ -1087,7 +1102,7 @@ function applySpecTex(kind) {
   if (kind === 'none') { mat.roughnessMap = null; u.specTex = null; u.specKind = null; }
   else {
     const { tex, url } = buildTex(kind, u.tile || [1, 1], u.rot || 0);
-    mat.roughnessMap = tex; u.specTex = url; u.specKind = kind === 'camo' ? null : kind; u.tile = u.tile || [1, 1];
+    mat.roughnessMap = tex; u.specTex = url; u.specKind = kind; u.tile = u.tile || [1, 1];
   }
   mat.needsUpdate = true;
 }
@@ -1240,12 +1255,20 @@ function roundNums(o, dp = 3) {
   };
   return walk(o);
 }
-// A material reduced to its non-default fields. Procedural KIND textures ship their id
-// (mapKind/…) and drop the fat data-URL; baked textures (no kind) keep their data-URL.
+// When a texture slot has pixels but no recognised KIND id (an untagged original from a
+// decomposed asset, or an imported map), we refuse to bake a fat base64 data-URL into the
+// export. Instead the slot falls back to this placeholder kind — tiny, and easy to spot and
+// re-texture later. _texFallbacks counts how many slots were defaulted in the last export.
+const FALLBACK_TEX = 'concrete';
+let _texFallbacks = 0;
+// A material reduced to its non-default fields. Every texture slot ships a KIND id
+// (its own, or FALLBACK_TEX for an untagged one) — never a base64 data-URL.
 function minimalMat(u) {
   const out = {};
-  const map = u.mapKind ? null : u.map, normalTex = u.normalKind ? null : u.normalTex, specTex = u.specKind ? null : u.specTex;
-  const hasMap = !!(u.mapKind || u.normalKind || u.specKind || map || normalTex || specTex);
+  const mapKind = u.mapKind || (u.map ? (_texFallbacks++, FALLBACK_TEX) : null);
+  const normalKind = u.normalKind || (u.normalTex ? (_texFallbacks++, FALLBACK_TEX) : null);
+  const specKind = u.specKind || (u.specTex ? (_texFallbacks++, FALLBACK_TEX) : null);
+  const hasMap = !!(mapKind || normalKind || specKind);
   if (u.kind === 'basic') out.kind = 'basic';
   if (u.color && u.color.toLowerCase() !== MAT_DEF.color) out.color = u.color;
   if (u.roughness != null && u.roughness !== MAT_DEF.roughness) out.roughness = u.roughness;   // default 0.8
@@ -1255,15 +1278,16 @@ function minimalMat(u) {
   if (u.opacity != null && u.opacity !== 1) out.opacity = u.opacity;
   if (u.transparent) out.transparent = true;
   if (u.team) out.team = true;                                        // follows team colour
-  if (u.mapKind) out.mapKind = u.mapKind; else if (map) out.map = map;
-  if (u.normalKind) out.normalKind = u.normalKind; else if (normalTex) out.normalTex = normalTex;
-  if ((u.normalKind || normalTex) && u.normalScale != null && u.normalScale !== 1) out.normalScale = u.normalScale;
-  if (u.specKind) out.specKind = u.specKind; else if (specTex) out.specTex = specTex;
+  if (mapKind) out.mapKind = mapKind;
+  if (normalKind) out.normalKind = normalKind;
+  if (normalKind && u.normalScale != null && u.normalScale !== 1) out.normalScale = u.normalScale;
+  if (specKind) out.specKind = specKind;
   if (hasMap && u.tile && (u.tile[0] !== 1 || u.tile[1] !== 1)) out.tile = u.tile;
   if (hasMap && u.rot) out.rot = u.rot;
   return out;
 }
 function exportConfig() {
+  _texFallbacks = 0;   // minimalMat bumps this per untagged texture slot it defaults
   const cfg = {
     id: meta.id, name: meta.name, category: meta.category, accent: meta.accent,
     destructible: meta.type === '—' ? null : { type: meta.type, hp: meta.hp },
@@ -1584,7 +1608,10 @@ function resetAsset() {
   msg('reset to code default'); flashSaved('reset');
 }
 
-document.getElementById('btn-export').addEventListener('click', () => { document.getElementById('export-text').value = JSON.stringify(exportConfig()); msg('exported ' + parts().length + ' parts'); });
+document.getElementById('btn-export').addEventListener('click', () => {
+  document.getElementById('export-text').value = JSON.stringify(exportConfig());
+  msg('exported ' + parts().length + ' parts' + (_texFallbacks ? ` — ${_texFallbacks} untagged texture${_texFallbacks > 1 ? 's' : ''} defaulted to ${FALLBACK_TEX}` : ''));
+});
 document.getElementById('btn-import').addEventListener('click', () => {
   try { const cfg = JSON.parse(document.getElementById('export-text').value); importConfig(cfg); saveLocal(); msg('imported ' + parts().length + ' parts'); }
   catch (e) { msg('✗ invalid JSON: ' + e.message); }
@@ -1669,7 +1696,7 @@ function updateHint() {
 // ── Pointer: tap=select, 1-finger drag=orbit/transform, 2-finger=pinch ───────
 const canvas = renderer.domElement;
 const pts = new Map();   // pointerId -> {x,y}
-let dragId = null, lastX = 0, lastY = 0, downX = 0, downY = 0, moved = false, pinchD = 0, orbitBtn = false;
+let dragId = null, lastX = 0, lastY = 0, downX = 0, downY = 0, moved = false, pinchD = 0, orbitBtn = false, panDrag = false;
 let gizmoDrag = null;   // {x,y} screen-space axis direction while dragging a gizmo arrow
 const dist2 = () => { const a = [...pts.values()]; return Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y); };
 
@@ -1679,6 +1706,7 @@ canvas.addEventListener('pointerdown', e => {
   if (pts.size === 1) {
     dragId = e.pointerId; lastX = downX = e.clientX; lastY = downY = e.clientY; moved = false;
     orbitBtn = e.button === 1; if (orbitBtn) e.preventDefault();
+    panDrag = orbitBtn && e.shiftKey;   // shift + middle mouse → pan (Blender-style)
     // grab a gizmo arrow? → lock that axis and drag-transform along it
     gizmoDrag = null;
     if (!orbitBtn) {
@@ -1686,7 +1714,7 @@ canvas.addEventListener('pointerdown', e => {
       if (ax) { toolAxis = ax; highlightAxisButton(ax); const o = gizmoOrigin(); gizmoDrag = o ? axisScreenDir(ax, o) : { x: 1, y: 0 }; }
     }
   }
-  else if (pts.size === 2) { pinchD = dist2(); dragId = null; gizmoDrag = null; }
+  else if (pts.size === 2) { pinchD = dist2(); dragId = null; gizmoDrag = null; panDrag = false; }
 });
 canvas.addEventListener('pointermove', e => {
   if (!pts.has(e.pointerId)) return;
@@ -1703,6 +1731,7 @@ canvas.addEventListener('pointermove', e => {
     const along = dx * gizmoDrag.x + dy * gizmoDrag.y;
     if (elemMode()) applyElementTransform(along); else applyTransform(along);
   }
+  else if (panDrag) panCamera(dx, dy);   // shift + middle mouse → pan
   else if (!orbitBtn && elemDragActive()) applyElementTransform(dx);
   else if (!orbitBtn && transformActive()) applyTransform(dx);
   else { camTheta -= dx * 0.008; camPhi = Math.max(0.1, Math.min(1.5, camPhi - dy * 0.008)); updateCamera(); }
@@ -1714,14 +1743,14 @@ function endPointer(e) {
     if (!moved && !orbitBtn && !gizmoDrag) {
       if (elemMode()) {
         const groups = pickElement(downX, downY);
-        if (groups) applyPick(groups);
+        if (groups) applyPick(groups, e.shiftKey);   // SHIFT adds/toggles the element
         else { raycastSelect(downX, downY); buildVertHandles(); selElems = []; updateElemHilite(); }
       }
       // a clean tap reselects even while a MOVE/SCALE/ROTATE tool is armed;
       // SHIFT-tap toggles the part in/out of a multi-selection.
       else raycastSelect(downX, downY, e.shiftKey);
     }
-    dragId = null; orbitBtn = false; gizmoDrag = null;
+    dragId = null; orbitBtn = false; gizmoDrag = null; panDrag = false;
   }
   if (pts.size === 1) { const [id, p] = [...pts.entries()][0]; dragId = id; lastX = downX = p.x; lastY = downY = p.y; moved = true; }
   if (pts.size >= 2) pinchD = dist2();
@@ -1790,9 +1819,11 @@ window.AD = {
   vertGroupCount: () => (vertGroups ? vertGroups.length : 0),
   setSelOp, selOp: () => selOp, selectAll: selectAllElements,
   selCount: () => selGroupSet().length, selElemCount: () => selElems.length,
-  pickVertex: (i) => applyPick([i]),
-  pickEdge: (a, b) => applyPick([a, b]),
-  pickFace: (a, b, c) => applyPick([a, b, c]),
+  pickVertex: (i, add) => applyPick([i], add),
+  pickEdge: (a, b, add) => applyPick([a, b], add),
+  pickFace: (a, b, c, add) => applyPick([a, b, c], add),
+  pan: (dx, dy) => panCamera(dx, dy),
+  camInfo: () => ({ pos: camera.position.toArray(), target: target.toArray() }),
   moveVertex: (axis, delta) => { toolMode = 'move'; toolAxis = axis; applyElementTransform(delta); },
   moveElement: (op, axis, delta) => { toolMode = op; toolAxis = axis; applyElementTransform(delta); },
   extrude: extrudeSelection, subdivide: subdivideMesh, flipQuad,
