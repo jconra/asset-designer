@@ -383,7 +383,7 @@ function readGeo(g) {
 // Add one part mesh. If `geometry` is given it's rendered as-is (exact original);
 // otherwise the geometry is built from kind+params. `parametric` marks whether
 // the live geometry came from params (so export/edit treat it as editable).
-function addPart({ kind, params, geometry, pos, rot, scale, mat, parametric, fallAt, dmgStyle }) {
+function addPart({ kind, params, geometry, pos, rot, scale, mat, parametric, fallAt, dmgStyle, group }) {
   const hasGeo = geometry != null;
   const geo = hasGeo
     ? (geometry instanceof THREE.BufferGeometry ? geometry : new THREE.BufferGeometryLoader().parse(geometry))
@@ -401,6 +401,7 @@ function addPart({ kind, params, geometry, pos, rot, scale, mat, parametric, fal
     // dmgStyle = how it goes ('tumble' = explode outward, 'squish' = pancake flat). 0 = only at death.
     fallAt: fallAt ?? 0, dmgStyle: dmgStyle || 'tumble',
   };
+  if (group) mesh.userData.group = group;   // named subassembly (see groupSelected / cfg.groups)
   model.add(mesh);
   return mesh;
 }
@@ -430,7 +431,7 @@ function buildFromMake(asset) {
   });
 }
 
-function clearModel() { clearVertHandles(); while (model.children.length) { const m = model.children[0]; model.remove(m); m.geometry.dispose(); } selIndex = -1; selSet = []; updateMultiSel(); selBox.visible = false; }
+function clearModel() { clearVertHandles(); while (model.children.length) { const m = model.children[0]; model.remove(m); m.geometry.dispose(); } selIndex = -1; selSet = []; groupMeta = {}; _gidNext = 1; updateMultiSel(); selBox.visible = false; }
 
 function loadAsset(i, { fresh = false } = {}) {
   flushSave();   // persist the asset we're leaving before we swap it out
@@ -478,16 +479,19 @@ function raycastSelect(px, py, additive = false) {
   if (!elemMode()) {
     // SHIFT toggles; otherwise the selection-op toolbar decides (ADD unions, SUBTRACT
     // removes, NORMAL replaces) — same as element picking, now for whole parts too.
+    // A grouped part drags its whole group in, so subassemblies select as one.
+    const mates = idx >= 0 ? groupMates(idx) : [];
+    const allIn = mates.length > 0 && mates.every(i => selSet.includes(i));
     if (additive) {
-      if (idx >= 0) { const at = selSet.indexOf(idx); if (at >= 0) selSet.splice(at, 1); else selSet.push(idx); }
+      if (mates.length) { if (allIn) selSet = selSet.filter(i => !mates.includes(i)); else for (const i of mates) if (!selSet.includes(i)) selSet.push(i); }
     } else if (selOp === 'add') {
-      if (idx >= 0 && !selSet.includes(idx)) selSet.push(idx);
+      for (const i of mates) if (!selSet.includes(i)) selSet.push(i);
     } else if (selOp === 'subtract') {
-      if (idx >= 0) { const at = selSet.indexOf(idx); if (at >= 0) selSet.splice(at, 1); }
+      selSet = selSet.filter(i => !mates.includes(i));
     } else {
-      selSet = idx >= 0 ? [idx] : [];
+      selSet = mates.slice();
     }
-    selIndex = selSet.length ? selSet[selSet.length - 1] : -1;
+    selIndex = idx >= 0 && selSet.includes(idx) ? idx : (selSet.length ? selSet[selSet.length - 1] : -1);
   } else {
     selIndex = idx; selSet = idx >= 0 ? [idx] : [];
   }
@@ -507,6 +511,7 @@ function updateSel() {
   refreshDmgParams();
   syncMapButtons();
   updateGizmo();
+  refreshGroupUI();
 }
 
 // ── Transform (axis-constrained drag) ────────────────────────────────────────
@@ -1036,6 +1041,62 @@ function duplicateSelected() {
   updateSel(); scheduleSave();
   msg(copies.length > 1 ? `duplicated ${copies.length} parts` : 'duplicated part');
 }
+// ── Groups (named subassemblies) ─────────────────────────────────────────────
+// A group tags a set of parts with a shared id so they select/move as ONE, and can
+// carry a ROLE (gun, gate, …) that tells the GAME how the subassembly articulates.
+// Membership lives on each part (userData.group); groupMeta holds each group's role.
+let groupMeta = {};      // groupId -> { role }
+let _gidNext = 1;
+const selIdxs = () => (selSet.length ? selSet.slice() : (selIndex >= 0 ? [selIndex] : []));
+// Every part index sharing idx's group (or just [idx] when it's ungrouped).
+function groupMates(idx) {
+  const m = parts()[idx]; if (!m) return [];
+  const g = m.userData.group; if (!g) return [idx];
+  const out = []; parts().forEach((p, i) => { if (p.userData.group === g) out.push(i); });
+  return out.length ? out : [idx];
+}
+// The single group id spanning the current selection (null if none / mixed).
+function currentGroupId() {
+  const ids = new Set();
+  for (const i of selIdxs()) { const g = parts()[i] && parts()[i].userData.group; if (g) ids.add(g); }
+  return ids.size === 1 ? [...ids][0] : null;
+}
+function pruneGroups() {
+  const used = new Set(parts().map(p => p.userData.group).filter(Boolean));
+  for (const id of Object.keys(groupMeta)) if (!used.has(id)) delete groupMeta[id];
+}
+function groupSelected() {
+  const idxs = selIdxs();
+  if (!idxs.length) { msg('select parts to group'); return; }
+  const id = 'g' + (_gidNext++);
+  for (const i of idxs) { const m = parts()[i]; if (m) m.userData.group = id; }
+  groupMeta[id] = { role: '' };
+  updateSel(); scheduleSave();
+  msg(`grouped ${idxs.length} part${idxs.length > 1 ? 's' : ''}`);
+}
+function ungroupSelected() {
+  const idxs = selIdxs();
+  for (const i of idxs) { const m = parts()[i]; if (m) delete m.userData.group; }
+  pruneGroups(); updateSel(); scheduleSave(); msg('ungrouped');
+}
+function setGroupRole(role) {
+  const id = currentGroupId();
+  if (!id) { msg('select one group to give it a role'); return; }
+  (groupMeta[id] = groupMeta[id] || { role: '' }).role = role;
+  updateSel(); scheduleSave(); msg(`group role → ${role || 'none'}`);
+}
+// Reflect the current group + role in the GROUP tool controls.
+function refreshGroupUI() {
+  const id = currentGroupId();
+  const sel = document.getElementById('group-role');
+  const info = document.getElementById('group-info');
+  if (sel) { sel.value = id ? (groupMeta[id]?.role || '') : ''; sel.disabled = !id; }
+  if (info) {
+    if (id) { const n = groupMates(selIndex).length; const r = groupMeta[id]?.role; info.textContent = `⛓ ${id} · ${n} parts${r ? ' · ' + r : ''}`; }
+    else info.textContent = selIdxs().length ? 'ungrouped selection' : '';
+  }
+}
+
 // Turn the SELECTED part(s) around the world origin's Y axis (a fixed 90° step). Bakes
 // the turn into each part's transform — orbits its position about origin + spins its
 // orientation — so it exports/round-trips (vs. just rotating the display group).
@@ -1311,6 +1372,7 @@ function exportConfig() {
       const mat = minimalMat(u.mat); if (Object.keys(mat).length) part.mat = mat;   // omit an all-default material
       if (u.fallAt) part.fallAt = u.fallAt;                          // default 0
       if (u.dmgStyle && u.dmgStyle !== 'tumble') part.dmgStyle = u.dmgStyle;
+      if (u.group) part.group = u.group;                             // subassembly membership
       if (editable && u.parametric) {
         if (u.params && Object.keys(u.params).length) part.params = u.params;   // rebuild from params on load
       } else {
@@ -1320,13 +1382,26 @@ function exportConfig() {
       return part;
     }),
   };
+  // Group manifest: only groups that are actually used, with their role. The game
+  // reads this to assemble each subassembly into a pivoted, role-tagged sub-group.
+  const usedGroups = new Set(parts().map(m => m.userData.group).filter(Boolean));
+  if (usedGroups.size) {
+    cfg.groups = {};
+    for (const id of usedGroups) cfg.groups[id] = { role: (groupMeta[id]?.role) || '' };
+  }
   return roundNums(cfg, 3);
 }
 function importConfig(cfg, { silent = false } = {}) {
   clearModel();
   if (cfg.destructible) { meta.type = cfg.destructible.type; meta.hp = cfg.destructible.hp; }
   if (cfg.footprint) { meta.fw = cfg.footprint.w; meta.fd = cfg.footprint.d; }
-  for (const p of cfg.parts) addPart({ kind: p.kind, params: p.params, geometry: p.geo, pos: p.pos, rot: p.rot, scale: p.scale, mat: p.mat, fallAt: p.fallAt, dmgStyle: p.dmgStyle });
+  for (const p of cfg.parts) addPart({ kind: p.kind, params: p.params, geometry: p.geo, pos: p.pos, rot: p.rot, scale: p.scale, mat: p.mat, fallAt: p.fallAt, dmgStyle: p.dmgStyle, group: p.group });
+  // Restore group roles + advance the id counter past any imported gN ids.
+  groupMeta = {}; _gidNext = 1;
+  if (cfg.groups) for (const [id, g] of Object.entries(cfg.groups)) {
+    groupMeta[id] = { role: (g && g.role) || '' };
+    const n = /^g(\d+)$/.exec(id); if (n) _gidNext = Math.max(_gidNext, +n[1] + 1);
+  }
   if (!silent) { frameModel(); refreshStats(); }
 }
 
@@ -1630,7 +1705,11 @@ window.addEventListener('keydown', e => {
   if (k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); }
   else if (k === 'y') { e.preventDefault(); redo(); }
   else if (k === 'd') { e.preventDefault(); duplicateSelected(); }
+  else if (k === 'g') { e.preventDefault(); e.shiftKey ? ungroupSelected() : groupSelected(); }
 });
+document.getElementById('btn-group').addEventListener('click', groupSelected);
+document.getElementById('btn-ungroup').addEventListener('click', ungroupSelected);
+document.getElementById('group-role').addEventListener('change', e => setGroupRole(e.target.value));
 
 // AUTOSAVE: persist shortly after any edit gesture (a drag, a tap on a tool/swatch, a
 // typed value), debounced so a drag is a single write. Loading an asset isn't a user
@@ -1836,6 +1915,9 @@ window.AD = {
   gizmoVisible: () => gizmo.visible, gizmoOrigin: () => { const o = gizmoOrigin(); return o ? o.toArray() : null; },
   partDir: (i = selIndex) => { const m = parts()[i]; return m ? new THREE.Vector3(0, 0, 1).applyQuaternion(m.quaternion).toArray().map(v => +v.toFixed(3)) : null; },
   duplicate: duplicateSelected, recordHistory, rotateSelY,
+  group: groupSelected, ungroup: ungroupSelected, setGroupRole,
+  groupOf: (i = selIndex) => (parts()[i] ? parts()[i].userData.group || null : null),
+  groupMeta: () => JSON.parse(JSON.stringify(groupMeta)),
   setMeta: (k, v) => { meta[k] = v; refreshStats(); },
   exportConfig, importConfig,
   measureAll: () => ASSETS.map(a => {

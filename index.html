@@ -340,6 +340,19 @@
     <div class="tool" data-tool="delete">
       <button class="tool-btn">✕ DELETE</button>
     </div>
+    <div class="tool" data-tool="group">
+      <button class="tool-btn" title="Ctrl+G group · Ctrl+Shift+G ungroup">⛓ GROUP</button>
+      <div class="tool-kids">
+        <button id="btn-group">GROUP</button>
+        <button id="btn-ungroup">UNGROUP</button>
+        <select id="group-role" title="what this group does in-game" disabled>
+          <option value="">no role</option>
+          <option value="gun">gun (spins + fires)</option>
+          <option value="gate">gate (opens for allies)</option>
+        </select>
+        <span id="group-info" class="ghint"></span>
+      </div>
+    </div>
     </div></div>
   </div>
 
@@ -375,6 +388,6 @@
     }
   }
   </script>
-  <script type="module" src="js/main.js?v=51"></script>
+  <script type="module" src="js/main.js?v=52"></script>
 </body>
 </html>
