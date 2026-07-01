@@ -8,7 +8,7 @@
 // from here. Mobile-friendly collapsing widgets in each corner + pinch-zoom.
 
 import * as THREE from 'three';
-import { ASSETS } from 'https://rmrfbase.com/js/assets.manifest.js?v=4';
+import { ASSETS } from 'https://rmrfbase.com/js/assets.manifest.js?v=5';
 import { TEAM_COLORS, getCamoTextures } from 'https://rmrfbase.com/js/CamoTexture.js';
 import { concreteTexture, ribbedMetalTexture, fabricTexture, crateTexture, roofTexture, accentPlateTexture, hazardTexture,
   noiseTexture, grimeTexture, woodTexture, scratchedTexture } from 'https://rmrfbase.com/js/Textures.js?v=6';
@@ -445,8 +445,10 @@ function loadAsset(i, { fresh = false } = {}) {
 
   // manifest assets rebuild from their code maker; brand-new user assets have no
   // maker, so they fall back to a single starter box.
+  // Source priority: local edits (localStorage) → shared authored config (data) → code maker.
   const saved = !fresh && localStorage.getItem('assetdesigner:' + a.id);
-  if (saved) { try { importConfig(JSON.parse(saved), { silent: true }); } catch (e) { a.make ? buildFromMake(a) : addMesh('box'); } }
+  if (saved) { try { importConfig(JSON.parse(saved), { silent: true }); } catch (e) { a.config ? importConfig(a.config, { silent: true }) : a.make ? buildFromMake(a) : addMesh('box'); } }
+  else if (a.config) importConfig(a.config, { silent: true });
   else if (a.make) buildFromMake(a);
   else addMesh('box');
 

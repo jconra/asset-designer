@@ -186,9 +186,10 @@ void main(){
   }
   if(f==6) v = 1.0 - v;
   vec3 col = (uMono==1) ? vec3(v) : uTints[f] * (v*1.15);
-  // faint cyan crosshair at the repeat boundary (vUv = 0.5) — where seams would show
-  float seam = min(abs(vUv.x-0.5), abs(vUv.y-0.5));
-  col = mix(col, vec3(0.36,1.0,0.72), (1.0 - smoothstep(0.0, 0.0016, seam)) * 0.5);
+  // faint cyan crosshair at the repeat boundary (vUv = 0.5) — where seams would show;
+  // GRID toggles it off along with the tile gutters
+  if(uGrid==1){ float seam = min(abs(vUv.x-0.5), abs(vUv.y-0.5));
+    col = mix(col, vec3(0.36,1.0,0.72), (1.0 - smoothstep(0.0, 0.0016, seam)) * 0.5); }
   outColor = vec4(col, 1.0);
 }`;
 
