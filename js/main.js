@@ -4,14 +4,14 @@
 // select by raycast, move/scale/rotate per axis, recolour, edit metadata
 // (HP/footprint), and save/export/import a JSON config per asset.
 //
-// Dependency is ONE WAY: imports from https://rmrfbase.com/; the game never imports
+// Dependency is ONE WAY: imports from the game (/rmrf on this box); the game never imports
 // from here. Mobile-friendly collapsing widgets in each corner + pinch-zoom.
 
 import * as THREE from 'three';
-import { ASSETS } from 'https://rmrfbase.com/js/assets.manifest.js?v=5';
-import { TEAM_COLORS, getCamoTextures } from 'https://rmrfbase.com/js/CamoTexture.js';
+import { ASSETS } from '/rmrf/js/assets.manifest.js?v=8';   // same-origin: the designer always sees the BOX'S current game, no deploy lag
+import { TEAM_COLORS, getCamoTextures } from '/rmrf/js/CamoTexture.js';
 import { concreteTexture, ribbedMetalTexture, fabricTexture, crateTexture, roofTexture, accentPlateTexture, hazardTexture,
-  noiseTexture, grimeTexture, woodTexture, scratchedTexture } from 'https://rmrfbase.com/js/Textures.js?v=6';
+  noiseTexture, grimeTexture, woodTexture, scratchedTexture } from '/rmrf/js/Textures.js?v=6';
 
 // Procedural textures available to apply in the MATERIAL menu.
 const TEX = {
@@ -365,6 +365,19 @@ function makeGeo(kind, p = {}) {
     case 'plane': return new THREE.PlaneGeometry(p.w ?? 3, p.h ?? 3);
     default: return new THREE.BoxGeometry(2, 2, 2);
   }
+}
+
+// Does a (possibly frozen) part's geometry still exactly match its params primitive?
+// The freeze flag trips on decompose/open without any real vertex edit — a pristine
+// part doesn't need its geometry baked into the export.
+function geoIsPristine(m, u) {
+  if (!u.params || !u.kind || u.kind === 'frozen') return false;
+  const ref = makeGeo(u.kind, u.params);
+  const a = m.geometry.getAttribute('position'), b = ref.getAttribute('position');
+  const ok = !!a && !!b && a.array.length === b.array.length
+    && a.array.every((v, i) => Math.abs(v - b.array[i]) < 1e-4);
+  ref.dispose();
+  return ok;
 }
 
 // Map an existing geometry to an editable primitive so decomposed asset meshes
@@ -1375,7 +1388,11 @@ function exportConfig() {
       if (u.fallAt) part.fallAt = u.fallAt;                          // default 0
       if (u.dmgStyle && u.dmgStyle !== 'tumble') part.dmgStyle = u.dmgStyle;
       if (u.group) part.group = u.group;                             // subassembly membership
-      if (editable && u.parametric) {
+      if (editable && (u.parametric || geoIsPristine(m, u))) {
+        // parametric — or frozen-in-name-only: decompose/open marks every part
+        // parametric:false, so an untouched box used to export as a baked
+        // Float32Array blob. If the verts still EQUAL the params primitive,
+        // export the readable kind+params instead of the wall of numbers.
         if (u.params && Object.keys(u.params).length) part.params = u.params;   // rebuild from params on load
       } else {
         part.geo = m.geometry.toJSON();              // ship the exact geometry…
