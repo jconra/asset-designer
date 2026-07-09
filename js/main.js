@@ -8,7 +8,7 @@
 // from here. Mobile-friendly collapsing widgets in each corner + pinch-zoom.
 
 import * as THREE from 'three';
-import { ASSETS } from '/rmrf/js/assets.manifest.js?v=8';   // same-origin: the designer always sees the BOX'S current game, no deploy lag
+import { ASSETS } from '/rmrf/js/assets.manifest.js?v=9';   // same-origin: the designer always sees the BOX'S current game, no deploy lag
 import { TEAM_COLORS, getCamoTextures } from '/rmrf/js/CamoTexture.js';
 import { concreteTexture, ribbedMetalTexture, fabricTexture, crateTexture, roofTexture, accentPlateTexture, hazardTexture,
   noiseTexture, grimeTexture, woodTexture, scratchedTexture } from '/rmrf/js/Textures.js?v=6';
