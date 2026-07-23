@@ -380,14 +380,23 @@
   </div>
   <div id="hint">TAP MESH = SELECT&nbsp;•&nbsp;DRAG = ORBIT&nbsp;•&nbsp;PINCH = ZOOM</div>
 
-  <script type="importmap">
-  {
-    "imports": {
-      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
-    }
-  }
+  <script>
+    // The game's shared modules live at the ROOT of rmrfbase.com in production, but under
+    // /rmrf/ on the local box (where the designer can see uncommitted game changes with no
+    // deploy lag). Resolve the /rmrf/ import prefix to the right origin per environment —
+    // the old hard-coded /rmrf/ path 404'd on this subdomain, so the module never executed.
+    (function () {
+      var base = /(^|\.)rmrfbase\.com$/.test(location.hostname) ? 'https://rmrfbase.com' : '/rmrf';
+      var im = document.createElement('script');
+      im.type = 'importmap';
+      im.textContent = JSON.stringify({ imports: {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+        "/rmrf/": base + "/"
+      }});
+      document.head.appendChild(im);
+    })();
   </script>
-  <script type="module" src="js/main.js?v=55"></script>
+  <script type="module" src="js/main.js?v=56"></script>
 </body>
 </html>
